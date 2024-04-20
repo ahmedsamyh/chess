@@ -703,9 +703,10 @@ int WinMain(HINSTANCE instance,
 
   bool dev_mode = false;
 
+#ifdef DEBUG
   UI ui = UI_make(ctx, &font);
   Vector2f ui_pos = {0.f, 0.f};
-
+#endif
   Sprite hovering_piece_sprite = {0};
   if (!Sprite_init(&hovering_piece_sprite, Resman_load_texture_from_file(ctx->resman, "resources/gfx/piece_sheet.png"), PIECE_TYPE_COUNT*2, 1)) return 1;
 
@@ -867,7 +868,6 @@ int WinMain(HINSTANCE instance,
     cstr white_check_str = "";
     temp_sprintf(white_check_str, "White check: %s", (white_check ? "true" : "false"));
     UI_text(&ui, white_check_str, 24, COLOR_WHITE);
-
 
     UI_end(&ui);
 #endif
