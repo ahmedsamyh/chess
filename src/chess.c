@@ -2,10 +2,11 @@
 #include <time.h>
 
 // TODO: Implement Castling
-// TODO: Implement Check
 // TODO: Implement Checkmate
+// TODO: Implement Checkmate
+// TODO: Implement Transformation of Pawn to any piece except Pawn and King when they are at the base of the opponent
 // NOTE: Check is when king is in eatable but can king can move to safety or another piece can shield the king.
-// NOTE: Checkmate is when king /* is in eatable and not the above */
+// NOTE: Checkmate is when king is in eatable and not the above
 
 typedef struct Piece Piece;
 typedef enum Piece_type Piece_type;
@@ -23,17 +24,20 @@ static const int rows = 8;
 #define CHECKED_PIECE_COLOR COLOR_RED
 #define CHECKING_PIECE_COLOR COLOR_CYAN
 #define COORDINATE_COLOR COLOR_GREY
+#define BLACK_KING_COLOR COLOR_RED
+#define WHITE_KING_COLOR COLOR_GREEN
 
 static Piece* pieces = NULL; // dynamic-array
 static Piece* selected_piece = NULL;
 
 static Piece* checked_king = NULL;
-static Piece* checking_piece = NULL;
+static Piece* white_checking_piece = NULL;
+static Piece* black_checking_piece = NULL;
 static Piece* black_king = NULL;
 static Piece* white_king = NULL;
 
 static bool white_turn = true;
-static int piece_move_speed = 10;
+static int piece_move_speed = 20;
 
 static bool draw_hover_piece = false;
 static bool black_check = false;
@@ -44,6 +48,10 @@ static bool white_checkmate = false;
 // TODO: Move this to clock_vector
 static bool v2i_eq(Vector2i a, Vector2i b) {
   return (a.x == b.x) && (a.y == b.y);
+}
+
+inline Vector2f v2i_to_v2f(Vector2i v2i) {
+  return (Vector2f) {(float)v2i.x, (float)v2i.y};
 }
 
 Vector2i fix_to_tile_space(Vector2f pos) {
@@ -123,12 +131,43 @@ struct Piece {
   Piece_type type;
   Vector2i pos;
   Vector2i to;
+  int height;
   Sprite spr;
   Context* ctx;
   bool black;
   bool moved_once;
   bool moving;
 };
+
+inline void select_piece(Piece* piece) {
+  if (selected_piece) selected_piece->height = 0;
+  selected_piece = piece;
+  /* if (selected_piece) selected_piece->height = (int)(tile_size*0.25f); */
+}
+
+inline Piece** get_black_piece_ptrs(void) {
+  Piece** black_piece_ptrs = NULL;
+
+  for (int i = 0; i < arrlenu(pieces); ++i) {
+    if (pieces[i].black) {
+      arrput(black_piece_ptrs, &pieces[i]);
+    }
+  }
+
+  return black_piece_ptrs;
+}
+
+inline Piece** get_white_piece_ptrs(void) {
+  Piece** white_piece_ptrs = NULL;
+
+  for (int i = 0; i < arrlenu(pieces); ++i) {
+    if (!pieces[i].black) {
+      arrput(white_piece_ptrs, &pieces[i]);
+    }
+  }
+
+  return white_piece_ptrs;
+}
 
 static void reverse_offsets_y(Vector2i* offsets) {
   for (int i = 0; i < arrlenu(offsets); ++i) {
@@ -138,7 +177,8 @@ static void reverse_offsets_y(Vector2i* offsets) {
 
 Piece* get_piece_at_pos(Vector2i pos) {
   for (int i = 0; i < arrlenu(pieces); ++i) {
-    if (v2i_eq(pos, pieces[i].pos)) {
+    Vector2i p = pieces[i].moving ? pieces[i].to : pieces[i].pos;
+    if (v2i_eq(pos, p)) {
       return &pieces[i];
     }
   }
@@ -177,7 +217,7 @@ Piece* get_piece_at_pos(Vector2i pos) {
 
 typedef struct {
   Vector2i* movements; // dynamic-array
-  Piece** eatable_piece_ptrs;
+  Piece** eatable_piece_ptrs; // dynamic-array
 } Movement_result;
 
 inline void free_movement_results(Movement_result mr) {
@@ -336,6 +376,7 @@ void draw_piece(Piece* piece) {
   ASSERT(piece->ctx);
 
   piece->spr.pos = (Vector2f) {(float)piece->pos.x + tile_size/2.f, (float)piece->pos.y + tile_size/2.f};
+  piece->spr.pos.y -= piece->height;
 
   draw_sprite(piece->ctx, &piece->spr);
 }
@@ -351,16 +392,26 @@ bool animate_piece_moving(int delta) {
     Piece* piece = &pieces[i];
     if (piece->moving) {
       Vector2i dir = {0, 0};
-      if (piece->to.x - piece->pos.x < 0) {
-	dir.x = -piece_move_speed;
-      } else if (piece->to.x - piece->pos.x > 0) {
-	dir.x = piece_move_speed;
+      int diff = piece->to.x - piece->pos.x;
+      if (abs(diff) < abs(piece_move_speed)) {
+	piece->pos.x = piece->to.x;
+      } else {
+	if (diff < 0) {
+	  dir.x = -piece_move_speed;
+	} else if (diff > 0) {
+	  dir.x = piece_move_speed;
+	}
       }
 
-      if (piece->to.y - piece->pos.y < 0) {
-	dir.y = -piece_move_speed;
-      } else if (piece->to.y - piece->pos.y > 0) {
-	dir.y = piece_move_speed;
+      diff = piece->to.y - piece->pos.y;
+      if (abs(diff) < abs(piece_move_speed)) {
+	piece->pos.y = piece->to.y;
+      } else {
+	if (diff < 0) {
+	  dir.y = -piece_move_speed;
+	} else if (diff > 0) {
+	  dir.y = piece_move_speed;
+	}
       }
 
       dir = v2i_muls(dir, delta);
@@ -376,10 +427,22 @@ bool animate_piece_moving(int delta) {
   return false;
 }
 
+inline void offset_piece_when_removing_piece(Piece** piece, Piece* removing_piece) {
+  if ((*piece) > removing_piece) {
+    (*piece)--;
+  }
+}
+
 // TODO (speed): better way to remove piece
-void remove_piece(Piece* piece) {
+void remove_piece(Piece* removing_piece) {
+  offset_piece_when_removing_piece(&black_king, removing_piece);
+  offset_piece_when_removing_piece(&white_king, removing_piece);
+  if (checked_king) offset_piece_when_removing_piece(&checked_king, removing_piece);
+  if (white_checking_piece) offset_piece_when_removing_piece(&white_checking_piece, removing_piece);
+  if (black_checking_piece) offset_piece_when_removing_piece(&black_checking_piece, removing_piece);
+
   for (int i = 0; i < arrlenu(pieces); ++i) {
-    if (&pieces[i] == piece) {
+    if (&pieces[i] == removing_piece) {
       arrdel(pieces, i);
     }
   }
@@ -415,12 +478,6 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
       piece = *piece_ptr;
     }
 
-    if (black_king > eating_piece) {
-      black_king--;
-    }
-    if (white_king > eating_piece) {
-      white_king--;
-    }
 
     remove_piece(eating_piece);
   }
@@ -468,7 +525,7 @@ bool add_piece(Context* ctx, const Piece_type type, int y_offset, int* xs, size_
 
 void reset_variables(void) {
   draw_hover_piece = false;
-  selected_piece = NULL;
+  select_piece(NULL);
   black_checkmate = false;
   black_check = false;
   white_checkmate = false;
@@ -483,14 +540,19 @@ bool is_piece_in_danger(Piece* piece) {
 
     for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
       if (mr.eatable_piece_ptrs[j] == piece) {
-	checking_piece = &pieces[i];
+	if (piece->black) {
+	  white_checking_piece = &pieces[i];
+	} else {
+	  black_checking_piece = &pieces[i];
+	}
 	return true;
       }
     }
 
     free_movement_results(mr);
   }
-  checking_piece = NULL;
+  white_checking_piece = NULL;
+  black_checking_piece = NULL;
 
   return false;
 }
@@ -559,17 +621,11 @@ bool init_pieces(Context* ctx) {
 
 inline int get_random_idx(int arr_count) {
   ASSERT(arr_count > 0);
-  return arr_count == 1 ? 0 : (rand() % (arr_count-1));
+  return arr_count == 1 ? 0 : (rand() % (arr_count));
 }
 
 void ai_choose_piece(Piece** selecting_piece) {
-  Piece** black_piece_ptrs = NULL;
-
-  for (int i = 0; i < arrlenu(pieces); ++i) {
-    if (pieces[i].black) {
-      arrput(black_piece_ptrs, &pieces[i]);
-    }
-  }
+  Piece** black_piece_ptrs = get_black_piece_ptrs();
 
   ASSERT(arrlenu(black_piece_ptrs) > 0);
 
@@ -578,6 +634,8 @@ void ai_choose_piece(Piece** selecting_piece) {
   ASSERT(0 <= random_idx && random_idx <= (arrlenu(black_piece_ptrs) - 1));
 
   *selecting_piece = black_piece_ptrs[random_idx];
+
+  arrfree(black_piece_ptrs);
 }
 
 void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
@@ -614,7 +672,124 @@ void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
   ASSERT(0 && "Unreachable!");
 }
 
+/* // TODO: Optimize */
+
+// ## Ways to get out of Check
+// -> king can move out of danger
+// -> other piece can protect king
+// -> any piece can eat the checking piece
+
+static void piece_protect_checked_king(void) {
+  ASSERT(checked_king);
+
+
+}
+
+inline bool tried_idx(int* tried_indices, int idx) {
+  for (int i = 0; i < arrlenu(tried_indices); ++i) {
+    if (tried_indices[i] == idx) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool checked_king_move_out_of_danger(void) {
+  ASSERT(checked_king);
+  Movement_result mr = get_piece_movement_positions(checked_king);
+
+  if (arrlenu(mr.movements) == 0) {
+    free_movement_results(mr);
+    return false;
+  } else {
+    int* tried_indices = NULL; // dynamic-array
+  checked_king_move_out_of_danger_retry:
+    if (arrlenu(tried_indices) == arrlenu(mr.movements)) {
+      arrfree(tried_indices);
+      free_movement_results(mr);
+      return false;
+    }
+
+    int movements_count = (int)arrlen(mr.movements);
+    int random_idx = get_random_idx(movements_count);
+    while (tried_idx(tried_indices, random_idx)) {
+      random_idx = get_random_idx(movements_count);
+    }
+
+    Vector2i prev_pos = checked_king->moving ? checked_king->to : checked_king->pos;
+    move_piece_to(&checked_king, mr.movements[random_idx]);
+
+    if (is_piece_in_danger(checked_king)) {
+      checked_king->to = prev_pos;
+      arrput(tried_indices, random_idx);
+      goto checked_king_move_out_of_danger_retry;
+    }
+
+    arrfree(tried_indices);
+  }
+
+  free_movement_results(mr);
+
+  return true;
+}
+
+static bool will_move_protect_king(Piece* piece, Movement_result mr) {
+  (void)piece;
+  (void)mr;
+}
+
+static bool eat_checking_piece(void) {
+  ASSERT(white_checking_piece);
+
+  Piece** piece_ptrs = get_white_piece_ptrs();
+
+  bool ate_checking_piece = false;
+
+  size_t piece_ptrs_count = arrlenu(piece_ptrs);
+  for (int i = 0; i < piece_ptrs_count; ++i) {
+    Piece* p = piece_ptrs[i];
+    Movement_result mr = get_piece_movement_positions(p);
+
+    size_t eatable_piece_ptrs_count = arrlenu(mr.eatable_piece_ptrs);
+    for (int j = 0; j < eatable_piece_ptrs_count; ++j) {
+      if (mr.eatable_piece_ptrs[j] == white_checking_piece) {
+	p->to = white_checking_piece->pos;
+	p->moving = true;
+        ate_checking_piece = true;
+	free_movement_results(mr);
+	goto done;
+      }
+    }
+
+    free_movement_results(mr);
+  }
+ done:
+  arrfree(piece_ptrs);
+
+  if (ate_checking_piece) {
+    remove_piece(white_checking_piece);
+    white_checking_piece = NULL;
+  }
+
+  return ate_checking_piece;
+}
+
 void ai_control_piece(Context* ctx) {
+  if (black_check) {
+    if (checked_king_move_out_of_danger()) {
+      log_info("King moved out of danger!");
+      white_turn = true;
+      return;
+    }
+
+    if (eat_checking_piece()) {
+      log_info("Other piece ate checking piece!");
+      white_turn = true;
+      return;
+    }
+    return;
+  }
+
   (void)ctx;
   Movement_result mr = {0};
 
@@ -635,8 +810,9 @@ void ai_control_piece(Context* ctx) {
 
   ai_choose_move(selected_piece, mr);
 
+
   char* moving_from_coord = get_coord_str(moving_from);
-  char* moved_to_coord = get_coord_str(selected_piece->pos);
+  char* moved_to_coord = get_coord_str(selected_piece->to);
 
   log_info("Moved %s %s Piece from %s to %s", (selected_piece->black ? "Black" : "White"), get_piece_type_str(selected_piece->type),
 	   moving_from_coord,
@@ -645,7 +821,7 @@ void ai_control_piece(Context* ctx) {
   free(moving_from_coord);
   free(moved_to_coord);
 
-  selected_piece = NULL;
+  select_piece(NULL);
 
   if (!selected_piece) {
     white_turn = true;
@@ -656,20 +832,20 @@ void user_control_piece(Context* ctx, bool can_control_black) {
   if (clock_mouse_pressed(ctx, MOUSE_BUTTON_LEFT)) {
     if (selected_piece) {
       if (move_piece_to(&selected_piece, fix_to_tile_space(ctx->mpos))) {
-	selected_piece = NULL;
+	select_piece(NULL);
 	white_turn = false;
       }
     } else {
-      selected_piece = get_piece_at_pos(fix_to_tile_space(ctx->mpos));
+      select_piece(get_piece_at_pos(fix_to_tile_space(ctx->mpos)));
       if (!can_control_black) {
-	if (selected_piece && selected_piece->black) selected_piece = NULL;
+	if (selected_piece && selected_piece->black) select_piece(NULL);
       }
     }
     draw_hover_piece = false;
   }
 
   if (clock_mouse_pressed(ctx, MOUSE_BUTTON_RIGHT)) {
-    selected_piece = NULL;
+    select_piece(NULL);
     draw_hover_piece = false;
   }
 }
@@ -704,6 +880,7 @@ int WinMain(HINSTANCE instance,
   bool dev_mode = false;
 
 #ifdef DEBUG
+
   UI ui = UI_make(ctx, &font);
   Vector2f ui_pos = {0.f, 0.f};
 #endif
@@ -830,8 +1007,8 @@ int WinMain(HINSTANCE instance,
     }
 
     // check
-    if (checked_king && checking_piece) {
-
+    if (checked_king && (white_checking_piece || black_checking_piece)) {
+      Piece* checking_piece = white_checking_piece ? white_checking_piece : black_checking_piece;
       Vector2i pos = checked_king->pos;
       draw_box(ctx, (Rect) {
 	  .pos = (Vector2f) {(float)pos.x, (float)pos.y},
@@ -849,38 +1026,78 @@ int WinMain(HINSTANCE instance,
 	color_alpha(CHECKING_PIECE_COLOR, 0.3f));
     }
 
+#ifdef DEBUG
+    {
+      Vector2f pos = {0.f, 0.f};
+      draw_text(ctx, &font, (white_turn ? "White turn" : "Black turn"), pos, 24, COLOR_WHITE);
+      draw_text(ctx, &font, (white_turn ? "White turn" : "Black turn"), v2f_subs(pos, 2.f), 24, COLOR_BLACK);
+    }
     // dev_mode indicator
     if (dev_mode) {
       draw_text(ctx, &font, "Dev_mode", (Vector2f) {0.f, 0.f}, 12, COLOR_RED);
+
+      if (black_king) {
+	Vector2i pos = black_king->pos;
+	draw_box(ctx, (Rect) {
+	    .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+	    .size = (Vector2f) {(float)tile_size, (float)tile_size}
+	  },
+	  BLACK_KING_COLOR,
+	  color_alpha(BLACK_KING_COLOR, 0.3f));
+
+	Vector2f text_pos = v2i_to_v2f(v2i_add(pos, (Vector2i) {tile_size, tile_size}));
+
+	draw_text(ctx, &font, "Black King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
+	draw_text(ctx, &font, "Black King", text_pos, 18, COLOR_WHITE);
+
+	draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
+      }
+
+      if (white_king) {
+	Vector2i pos = white_king->pos;
+	draw_box(ctx, (Rect) {
+	    .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+	    .size = (Vector2f) {(float)tile_size, (float)tile_size}
+	  },
+	  WHITE_KING_COLOR,
+	  color_alpha(WHITE_KING_COLOR, 0.3f));
+	Vector2f text_pos = v2i_to_v2f(v2i_sub(pos, (Vector2i) {tile_size, tile_size}));
+
+	draw_text(ctx, &font, "White King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
+	draw_text(ctx, &font, "White King", text_pos, 18, COLOR_WHITE);
+
+	draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
+
+      }
     }
 
+#endif
     //
     // Ui
     //
 
 #ifdef DEBUG
-    UI_begin(&ui, &ui_pos, UI_LAYOUT_KIND_VERT);
+    if (dev_mode) {
+      UI_begin(&ui, &ui_pos, UI_LAYOUT_KIND_VERT);
 
-    cstr black_check_str = "";
-    temp_sprintf(black_check_str, "Black check: %s", (black_check ? "true" : "false"));
-    UI_text(&ui, black_check_str, 24, COLOR_WHITE);
+      cstr checked_king_str = "";
+      temp_sprintf(checked_king_str, "Checked king: %p", checked_king);
+      UI_text(&ui, checked_king_str, 24, COLOR_GOLD);
 
-    cstr white_check_str = "";
-    temp_sprintf(white_check_str, "White check: %s", (white_check ? "true" : "false"));
-    UI_text(&ui, white_check_str, 24, COLOR_WHITE);
-
-    UI_end(&ui);
+      UI_end(&ui);
+    }
 #endif
 
     //
     // Update
     //
-
+#ifdef DEBUG
     // dev_mode
     if (clock_key_pressed(ctx, KEY_F1)) {
       dev_mode = !dev_mode;
       white_turn = true;
     }
+#endif
 
     // reset
     if (clock_key_pressed(ctx, KEY_R)) {
@@ -889,35 +1106,39 @@ int WinMain(HINSTANCE instance,
 
     // move piece
     if (dev_mode) {
+#ifdef DEBUG
       if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
 	user_control_piece(ctx, true);
       }
 
       // remove piece
       if (clock_mouse_pressed(ctx, MOUSE_BUTTON_MIDDLE)) {
-	selected_piece = NULL;
+	select_piece(NULL);
 	Piece* clicked_piece = get_piece_at_pos(fix_to_tile_space(ctx->mpos));
 	if (clicked_piece) {
 	  remove_piece(clicked_piece);
 	}
       }
+#endif
     } else {
       if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
 	if (white_turn) {
-	  white_check = is_piece_in_danger(white_king);
-	  if (white_check) { checked_king = white_king; }
 	  user_control_piece(ctx, false);
 	} else {
 	  ai_control_piece(ctx);
-	  black_check = is_piece_in_danger(black_king);
-	  if (black_check) { checked_king = black_king; }
-	 }
+	}
       }
     }
+    white_check = is_piece_in_danger(white_king);
+    if (white_check) { checked_king = white_king; }
+
+    black_check = is_piece_in_danger(black_king);
+    if (black_check) { checked_king = black_king; }
 
     clock_end_draw(ctx);
   }
 
+  UI_free(&ui);
   Font_deinit(&font);
   clock_deinit(ctx);
 
