@@ -30,7 +30,6 @@ static const int rows = 8;
 static Piece* pieces = NULL; // dynamic-array
 static Piece* selected_piece = NULL;
 
-static Piece* checked_king = NULL;
 static Piece* white_checking_piece = NULL;
 static Piece* black_checking_piece = NULL;
 static Piece* black_king = NULL;
@@ -385,6 +384,11 @@ bool init_piece(Piece* piece, Context* ctx, const Piece_type type, bool black) {
   return true;
 }
 
+void deinit_piece(Piece* piece) {
+  (void)piece;
+  /* Sprite_deinit(&piece->spr); */
+}
+
 void draw_piece(Piece* piece) {
   ASSERT(piece->ctx);
 
@@ -450,12 +454,12 @@ inline void offset_piece_when_removing_piece(Piece** piece, Piece* removing_piec
 void remove_piece(Piece* removing_piece) {
   offset_piece_when_removing_piece(&black_king, removing_piece);
   offset_piece_when_removing_piece(&white_king, removing_piece);
-  if (checked_king) offset_piece_when_removing_piece(&checked_king, removing_piece);
   if (white_checking_piece) offset_piece_when_removing_piece(&white_checking_piece, removing_piece);
   if (black_checking_piece) offset_piece_when_removing_piece(&black_checking_piece, removing_piece);
 
   for (int i = 0; i < arrlenu(pieces); ++i) {
     if (&pieces[i] == removing_piece) {
+      deinit_piece(&pieces[i]);
       arrdel(pieces, i);
     }
   }
@@ -703,8 +707,8 @@ inline bool tried_idx(int* tried_indices, int idx) {
 }
 
 static bool ai_checked_king_move_out_of_danger(void) {
-  ASSERT(checked_king);
-  Movement_result mr = get_piece_movement_positions(checked_king);
+  ASSERT(black_king);
+  Movement_result mr = get_piece_movement_positions(black_king);
 
   if (arrlenu(mr.movements) == 0) {
     free_movement_results(mr);
@@ -724,11 +728,11 @@ static bool ai_checked_king_move_out_of_danger(void) {
       random_idx = get_random_idx(movements_count);
     }
 
-    Vector2i prev_pos = checked_king->moving ? checked_king->to : checked_king->pos;
-    move_piece_to(&checked_king, mr.movements[random_idx]);
+    Vector2i prev_pos = black_king->moving ? black_king->to : black_king->pos;
+    move_piece_to(&black_king, mr.movements[random_idx]);
 
-    if (is_piece_in_danger(checked_king)) {
-      checked_king->to = prev_pos;
+    if (is_piece_in_danger(black_king)) {
+      black_king->to = prev_pos;
       arrput(tried_indices, random_idx);
       goto checked_king_move_out_of_danger_retry;
     }
@@ -940,6 +944,33 @@ static void remove_pieces_marked_for_removal(void) {
   }
 }
 
+static void draw_check(Context* ctx, Piece* checking_piece, Piece* checked_king) {
+  ASSERT(checking_piece);
+  ASSERT(checked_king);
+  Vector2i pos = checked_king->pos;
+  draw_box(ctx, (Rect) {
+      .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+      .size = (Vector2f) {(float)tile_size, (float)tile_size}
+    },
+    CHECKED_PIECE_COLOR,
+    color_alpha(CHECKED_PIECE_COLOR, 0.3f));
+
+  pos = checking_piece->pos;
+  draw_box(ctx, (Rect) {
+      .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+      .size = (Vector2f) {(float)tile_size, (float)tile_size}
+    },
+    CHECKING_PIECE_COLOR,
+    color_alpha(CHECKING_PIECE_COLOR, 0.3f));
+}
+
+inline bool is_tile_white(Vector2i pos) {
+  Vector2i n = v2i_divs(pos, tile_size);
+  if (n.y % 2 != n.x % 2)
+    return false;
+  return true;
+}
+
 #ifdef DEBUG
 int main(void) {
   #else
@@ -956,6 +987,7 @@ int WinMain(HINSTANCE instance,
   srand((uint)time(0));
 
   Context* ctx = clock_init(960, 960, 1.f, 1.f, "Chess", WINDOW_VSYNC);
+
   if (!ctx) return 1;
 
   tile_size = (ctx->win->width/cols);
@@ -977,13 +1009,16 @@ int WinMain(HINSTANCE instance,
 #endif
   Sprite hovering_piece_sprite = {0};
   if (!Sprite_init(&hovering_piece_sprite, Resman_load_texture_from_file(ctx->resman, "resources/gfx/piece_sheet.png"), PIECE_TYPE_COUNT*2, 1)) return 1;
-
   Sprite_center_origin(&hovering_piece_sprite);
-
   hovering_piece_sprite.scale.x = (float)(ctx->win->width/480);
   hovering_piece_sprite.scale.y = (float)(ctx->win->height/480);
-
   hovering_piece_sprite.tint.a = 0.4f;
+
+  Sprite selected_tile_spr = {0};
+  if (!Sprite_init(&selected_tile_spr, Resman_load_texture_from_file(ctx->resman, "resources/gfx/movable_tile.png"), 2, 1)) return 1;
+  Sprite_center_origin(&selected_tile_spr);
+  selected_tile_spr.scale.x = (float)(ctx->win->width/480)  + 1.f;
+  selected_tile_spr.scale.y = (float)(ctx->win->height/480) + 1.f;
 
   // TEMP: Piece testing
 #if TESTING
@@ -1036,12 +1071,14 @@ int WinMain(HINSTANCE instance,
 
     // draw selection
     if (selected_piece) {
-      draw_box(ctx, (Rect) {
-	  .pos = (Vector2f) {(float)selected_piece->pos.x, (float)selected_piece->pos.y},
-	  .size = (Vector2f) {(float)tile_size, (float)tile_size}
-	},
-        SELECTED_PIECE_COLOR,
-	color_alpha(SELECTED_PIECE_COLOR, 0.5f));
+      Sprite_set_hframe(&selected_tile_spr, (is_tile_white(selected_piece->pos) ? 1 : 0));
+      draw_sprite_at(ctx, &selected_tile_spr, (Vector2f) {(float)selected_piece->pos.x + tile_size/2.f, (float)selected_piece->pos.y + tile_size/2.f});
+      /* draw_box(ctx, (Rect) { */
+      /* 	  .pos = (Vector2f) {(float)selected_piece->pos.x, (float)selected_piece->pos.y}, */
+      /* 	  .size = (Vector2f) {(float)tile_size, (float)tile_size} */
+      /* 	}, */
+      /*   SELECTED_PIECE_COLOR, */
+      /* 	color_alpha(SELECTED_PIECE_COLOR, 0.5f)); */
 
       Movement_result mr =  get_piece_movement_positions(selected_piece);
       Vector2i* move_poses = mr.movements;
@@ -1098,25 +1135,11 @@ int WinMain(HINSTANCE instance,
       draw_sprite(ctx, &hovering_piece_sprite);
     }
 
-    // check
-    if (checked_king && (white_checking_piece || black_checking_piece)) {
-      Piece* checking_piece = white_checking_piece ? white_checking_piece : black_checking_piece;
-      Vector2i pos = checked_king->pos;
-      draw_box(ctx, (Rect) {
-	  .pos = (Vector2f) {(float)pos.x, (float)pos.y},
-	  .size = (Vector2f) {(float)tile_size, (float)tile_size}
-	},
-	CHECKED_PIECE_COLOR,
-	color_alpha(CHECKED_PIECE_COLOR, 0.3f));
-
-      pos = checking_piece->pos;
-      draw_box(ctx, (Rect) {
-	  .pos = (Vector2f) {(float)pos.x, (float)pos.y},
-	  .size = (Vector2f) {(float)tile_size, (float)tile_size}
-	},
-	CHECKING_PIECE_COLOR,
-	color_alpha(CHECKING_PIECE_COLOR, 0.3f));
-    }
+    // black check
+    if (black_check)
+      draw_check(ctx, white_checking_piece, black_king);
+    if (white_check)
+      draw_check(ctx, black_checking_piece, white_king);
 
 #ifdef DEBUG
     {
@@ -1258,16 +1281,16 @@ int WinMain(HINSTANCE instance,
 #endif
 
     white_check = is_piece_in_danger(white_king);
-    if (white_check) { checked_king = white_king; }
 
     black_check = is_piece_in_danger(black_king);
-    if (black_check) { checked_king = black_king; }
 
     remove_pieces_marked_for_removal();
 
     clock_end_draw(ctx);
   }
 
+  Sprite_deinit(&hovering_piece_sprite);
+  Sprite_deinit(&selected_tile_spr);
   UI_free(&ui);
   Font_deinit(&font);
   clock_deinit(ctx);
