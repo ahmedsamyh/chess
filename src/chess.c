@@ -45,6 +45,13 @@ static bool black_checkmate = false;
 static bool white_check = false;
 static bool white_checkmate = false;
 
+typedef struct {
+  Piece* eating_piece;
+  Piece* eated_piece;
+} Piece_removal_entry;
+
+static Piece_removal_entry* piece_removal_entries = NULL; // dynamic-array
+
 // TODO: Move this to clock_vector
 static bool v2i_eq(Vector2i a, Vector2i b) {
   return (a.x == b.x) && (a.y == b.y);
@@ -185,20 +192,11 @@ Piece* get_piece_at_pos(Vector2i pos) {
   return NULL;
 }
 
-// actually doesn't eat the piece; just adds a reference to it
-#define EAT_PIECE() \
-  Piece* existing_piece = get_piece_at_pos(v2i_add(piece->pos, v2i_muls(offset, tile_size))); \
-  if (existing_piece &&							\
-      existing_piece->black != piece->black) {				\
-    arrput(res.eatable_piece_ptrs, existing_piece);			\
-  }
-
 #define BREAK_IF_PIECE_EXISTS() \
   Vector2i pos = v2i_add(piece->pos, v2i_muls(offset, tile_size));	\
   if (get_piece_at_pos(pos)) break
 
 #define BREAK_AND_EAT_PIECE() \
-  EAT_PIECE();		      \
   BREAK_IF_PIECE_EXISTS()
 
 #define BISHOP_MOVEMENTS(dx, dy)					\
@@ -255,12 +253,10 @@ Movement_result get_piece_movement_positions(Piece* piece) {
 	if (i != 0 && j != 0) {
 	  Vector2i offset = {i, j*2};
 	  {
-	    EAT_PIECE();
 	    arrput(offsets, offset);
 	  }
 	  {
 	    offset = (Vector2i) {i*2, j*1};
-	    EAT_PIECE();
 	    arrput(offsets, offset);
 	  }
 	}
@@ -272,7 +268,6 @@ Movement_result get_piece_movement_positions(Piece* piece) {
       for (int y = -1; y <= 1; ++y) {
 	if (x != 0 || y != 0) {
 	  Vector2i offset = {x, y};
-	  EAT_PIECE();
 	  arrput(offsets, offset);
 	}
       }
@@ -296,9 +291,7 @@ Movement_result get_piece_movement_positions(Piece* piece) {
     Vector2i offset = offsets[i];
     Vector2i pos = v2i_add(piece->pos, v2i_muls(offset, tile_size));
     if (is_pos_in_bounds_in_screen_space(pos)) {
-      Piece* existing_piece = get_piece_at_pos(pos);
-      if (existing_piece == NULL)
-	arrput(res.movements, pos);
+      arrput(res.movements, pos);
     }
   }
 
@@ -456,30 +449,33 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
 
   bool moved = false;
 
-  Piece* eating_piece = NULL;
-  bool remove_eating_piece = false;
+  Piece* eated_piece = NULL;
+  bool remove_eated_piece = false;
   // eat
   for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) {
-    eating_piece = mr.eatable_piece_ptrs[i];
-    if (v2i_eq(eating_piece->pos, to)) {
+    eated_piece = mr.eatable_piece_ptrs[i];
+    if (v2i_eq(eated_piece->pos, to)) {
       piece->to = to;
       piece->moving = true;
       moved = true;
-      remove_eating_piece = true;
+      remove_eated_piece = true;
       break;
     }
   }
 
-  if (remove_eating_piece &&
-      eating_piece) {
-    ASSERT(eating_piece != piece);
-    if ((*piece_ptr) > eating_piece) {
+  if (remove_eated_piece &&
+      eated_piece) {
+    ASSERT(eated_piece != piece);
+    if ((*piece_ptr) > eated_piece) {
       (*piece_ptr)--;
       piece = *piece_ptr;
     }
 
-
-    remove_piece(eating_piece);
+    Piece_removal_entry entry =  {
+      .eating_piece = piece,
+      .eated_piece = eated_piece
+    };
+    arrput(piece_removal_entries, entry);
   }
 
   // move
@@ -744,6 +740,7 @@ static bool eat_checking_piece(void) {
   Piece** piece_ptrs = get_white_piece_ptrs();
 
   bool ate_checking_piece = false;
+  Piece* eating_piece = NULL;
 
   size_t piece_ptrs_count = arrlenu(piece_ptrs);
   for (int i = 0; i < piece_ptrs_count; ++i) {
@@ -753,6 +750,7 @@ static bool eat_checking_piece(void) {
     size_t eatable_piece_ptrs_count = arrlenu(mr.eatable_piece_ptrs);
     for (int j = 0; j < eatable_piece_ptrs_count; ++j) {
       if (mr.eatable_piece_ptrs[j] == white_checking_piece) {
+	eating_piece = p;
 	p->to = white_checking_piece->pos;
 	p->moving = true;
         ate_checking_piece = true;
@@ -767,7 +765,12 @@ static bool eat_checking_piece(void) {
   arrfree(piece_ptrs);
 
   if (ate_checking_piece) {
-    remove_piece(white_checking_piece);
+    ASSERT(eating_piece);
+    Piece_removal_entry entry =  {
+      .eating_piece = eating_piece,
+      .eated_piece = white_checking_piece
+    };
+    arrput(piece_removal_entries, entry);
     white_checking_piece = NULL;
   }
 
@@ -850,6 +853,19 @@ void user_control_piece(Context* ctx, bool can_control_black) {
   }
 }
 
+static void remove_pieces_marked_for_removal(void) {
+  int piece_removal_entries_count = (int)arrlen(piece_removal_entries);
+  for (int i = piece_removal_entries_count-1; i >= 0; --i) {
+    Piece_removal_entry entry = piece_removal_entries[i];
+    ASSERT(entry.eating_piece);
+    ASSERT(entry.eated_piece);
+    if (v2i_eq(entry.eating_piece->to, entry.eated_piece->to)) {
+      remove_piece(entry.eated_piece);
+      arrdel(piece_removal_entries, i);
+    }
+  }
+}
+
 #ifdef DEBUG
 int main(void) {
   #else
@@ -878,6 +894,7 @@ int WinMain(HINSTANCE instance,
   }
 
   bool dev_mode = false;
+  bool user_control_all_pieces = false;
 
 #ifdef DEBUG
 
@@ -1080,11 +1097,24 @@ int WinMain(HINSTANCE instance,
     if (dev_mode) {
       UI_begin(&ui, &ui_pos, UI_LAYOUT_KIND_VERT);
 
-      cstr checked_king_str = "";
-      temp_sprintf(checked_king_str, "Checked king: %p", checked_king);
+      Arena str_arena = Arena_make(0);
+
+      cstr checked_king_str = Arena_alloc_str(str_arena, "Checked king: %p", checked_king);
       UI_text(&ui, checked_king_str, 24, COLOR_GOLD);
 
+      Piece** black_piece_ptrs = get_black_piece_ptrs();
+      cstr black_pieces_count_str = Arena_alloc_str(str_arena, "Black_pcs count: %zu", arrlenu(black_piece_ptrs));
+      UI_text(&ui, black_pieces_count_str, 24, COLOR_GOLD);
+      arrfree(black_piece_ptrs);
+
+      Piece** white_piece_ptrs = get_white_piece_ptrs();
+      cstr white_pieces_count_str = Arena_alloc_str(str_arena, "White_pcs count: %zu", arrlenu(white_piece_ptrs));
+      UI_text(&ui, white_pieces_count_str, 24, COLOR_GOLD);
+      arrfree(white_piece_ptrs);
+
       UI_end(&ui);
+
+      Arena_free(&str_arena);
     }
 #endif
 
@@ -1097,6 +1127,11 @@ int WinMain(HINSTANCE instance,
       dev_mode = !dev_mode;
       white_turn = true;
     }
+
+    if (clock_key_pressed(ctx, KEY_F2)) {
+      user_control_all_pieces = !user_control_all_pieces;
+      white_turn = true;
+    }
 #endif
 
     // reset
@@ -1105,12 +1140,17 @@ int WinMain(HINSTANCE instance,
     }
 
     // move piece
-    if (dev_mode) {
-#ifdef DEBUG
-      if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
-	user_control_piece(ctx, true);
-      }
 
+    if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
+      if (white_turn) {
+	user_control_piece(ctx, user_control_all_pieces);
+      } else {
+	ai_control_piece(ctx);
+      }
+    }
+
+#ifdef DEBUG
+    if (dev_mode) {
       // remove piece
       if (clock_mouse_pressed(ctx, MOUSE_BUTTON_MIDDLE)) {
 	select_piece(NULL);
@@ -1119,21 +1159,16 @@ int WinMain(HINSTANCE instance,
 	  remove_piece(clicked_piece);
 	}
       }
-#endif
-    } else {
-      if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
-	if (white_turn) {
-	  user_control_piece(ctx, false);
-	} else {
-	  ai_control_piece(ctx);
-	}
-      }
     }
+#endif
+
     white_check = is_piece_in_danger(white_king);
     if (white_check) { checked_king = white_king; }
 
     black_check = is_piece_in_danger(black_king);
     if (black_check) { checked_king = black_king; }
+
+    remove_pieces_marked_for_removal();
 
     clock_end_draw(ctx);
   }
