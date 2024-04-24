@@ -37,7 +37,7 @@ static Piece* black_king = NULL;
 static Piece* white_king = NULL;
 
 static bool white_turn = true;
-static int piece_move_speed = 20;
+static int piece_move_speed = 12;
 
 static bool draw_hover_piece = false;
 static bool black_check = false;
@@ -192,11 +192,20 @@ Piece* get_piece_at_pos(Vector2i pos) {
   return NULL;
 }
 
-#define BREAK_IF_PIECE_EXISTS() \
+// actually doesn't eat the piece; just adds a reference to it
+#define EAT_PIECE() \
+  Piece* existing_piece = get_piece_at_pos(v2i_add(piece->pos, v2i_muls(offset, tile_size))); \
+  if (existing_piece &&							\
+      existing_piece->black != piece->black) {				\
+    arrput(res.eatable_piece_ptrs, existing_piece);			\
+  }
+
+#define BREAK_IF_PIECE_EXISTS()						\
   Vector2i pos = v2i_add(piece->pos, v2i_muls(offset, tile_size));	\
   if (get_piece_at_pos(pos)) break
 
 #define BREAK_AND_EAT_PIECE() \
+  EAT_PIECE();		      \
   BREAK_IF_PIECE_EXISTS()
 
 #define BISHOP_MOVEMENTS(dx, dy)					\
@@ -291,7 +300,13 @@ Movement_result get_piece_movement_positions(Piece* piece) {
     Vector2i offset = offsets[i];
     Vector2i pos = v2i_add(piece->pos, v2i_muls(offset, tile_size));
     if (is_pos_in_bounds_in_screen_space(pos)) {
-      arrput(res.movements, pos);
+      Piece* existing_piece = get_piece_at_pos(pos);
+      if (existing_piece) {
+	if (existing_piece->black != piece->black)
+	  arrput(res.eatable_piece_ptrs, existing_piece);
+      } else {
+	arrput(res.movements, pos);
+      }
     }
   }
 
@@ -466,15 +481,12 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
   if (remove_eated_piece &&
       eated_piece) {
     ASSERT(eated_piece != piece);
-    if ((*piece_ptr) > eated_piece) {
-      (*piece_ptr)--;
-      piece = *piece_ptr;
-    }
 
     Piece_removal_entry entry =  {
       .eating_piece = piece,
       .eated_piece = eated_piece
     };
+    ASSERT(entry.eating_piece->black != entry.eated_piece->black);
     arrput(piece_removal_entries, entry);
   }
 
@@ -636,6 +648,7 @@ void ai_choose_piece(Piece** selecting_piece) {
 
 void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
   int movements_count = (int)arrlenu(mr.movements);
+
   int eatable_piece_ptrs_count = (int)arrlenu(mr.eatable_piece_ptrs);
 
   if (movements_count > 0 && eatable_piece_ptrs_count > 0) {
@@ -859,7 +872,7 @@ static void remove_pieces_marked_for_removal(void) {
     Piece_removal_entry entry = piece_removal_entries[i];
     ASSERT(entry.eating_piece);
     ASSERT(entry.eated_piece);
-    if (v2i_eq(entry.eating_piece->to, entry.eated_piece->to)) {
+    if (v2i_eq(entry.eating_piece->pos, entry.eated_piece->pos)) {
       remove_piece(entry.eated_piece);
       arrdel(piece_removal_entries, i);
     }
