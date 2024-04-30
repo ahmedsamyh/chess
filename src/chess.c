@@ -14,6 +14,9 @@ typedef enum Piece_type Piece_type;
 static int tile_size;
 static const int cols = 8;
 static const int rows = 8;
+static Rect board_rect = {0};
+
+#define CHAR_SIZE 32
 
 #define WHITE false
 #define BLACK true
@@ -23,7 +26,7 @@ static const int rows = 8;
 #define EATABLE_PIECE_COLOR COLOR_MAGENTA
 #define CHECKED_PIECE_COLOR COLOR_RED
 #define CHECKING_PIECE_COLOR COLOR_CYAN
-#define COORDINATE_COLOR COLOR_GREY
+#define COORDINATE_COLOR COLOR_GRAY
 #define BLACK_KING_COLOR COLOR_RED
 #define WHITE_KING_COLOR COLOR_GREEN
 
@@ -43,6 +46,10 @@ static bool black_check = false;
 static bool black_checkmate = false;
 static bool white_check = false;
 static bool white_checkmate = false;
+
+static bool dev_mode = false;
+static bool user_control_all_pieces = false;
+
 
 static void change_turn(void) {
   white_turn = !white_turn;
@@ -971,6 +978,158 @@ inline bool is_tile_white(Vector2i pos) {
   return true;
 }
 
+static void draw_board(Context* ctx, Font* font, Sprite* selected_tile_spr, Sprite* hovering_piece_sprite) {
+
+  clock_use_camera_view(ctx, true);
+
+  // draw checker pattern
+  for (int y = 0; y < rows; ++y) {
+    for (int x = 0; x < cols; ++x) {
+      Color col = color_from_hex(0XFFF0F6F0);
+      if (y % 2 != x % 2) col = color_from_hex(0xFF232322);
+      draw_rect(ctx, (Rect) {
+	  .pos = (Vector2f) {(float)x*tile_size, (float)y*tile_size},
+	  .size = (Vector2f) {(float)tile_size, (float)tile_size}},
+	col);
+    }
+  }
+
+  // draw coords
+  for (int y = 0; y < rows; ++y) {
+    for (int x = 0; x < cols; ++x) {
+      Vector2f pos_in_screen_space = {x*tile_size*1.f, y*tile_size*1.f};
+
+      cstr coord_str = "";
+      temp_sprintf(coord_str, "%c%c", x_coord_strs[x], y_coord_strs[rows-1-y]);
+      draw_text(ctx, font, coord_str, pos_in_screen_space, CHAR_SIZE, color_alpha(COORDINATE_COLOR, (clock_key_held(ctx, KEY_LEFT_ALT) ? 0.75f : 0.2f)));
+    }
+  }
+
+  // draw pieces
+  for (int i = 0; i < arrlenu(pieces); ++i) {
+    Piece* p = &pieces[i];
+    draw_piece(p);
+  }
+
+
+  // draw selection
+  if (selected_piece) {
+    Sprite_set_hframe(selected_tile_spr, (is_tile_white(selected_piece->pos) ? 1 : 0));
+    draw_sprite_at(ctx, selected_tile_spr, (Vector2f) {(float)selected_piece->pos.x + tile_size/2.f, (float)selected_piece->pos.y + tile_size/2.f});
+    /* draw_box(ctx, (Rect) { */
+    /* 	  .pos = (Vector2f) {(float)selected_piece->pos.x, (float)selected_piece->pos.y}, */
+    /* 	  .size = (Vector2f) {(float)tile_size, (float)tile_size} */
+    /* 	}, */
+    /*   SELECTED_PIECE_COLOR, */
+    /* 	color_alpha(SELECTED_PIECE_COLOR, 0.5f)); */
+
+    Movement_result mr =  get_piece_movement_positions(selected_piece);
+    Vector2i* move_poses = mr.movements;
+
+    draw_hover_piece = false;
+    // hovering piece checking
+    for (int i = 0; i < arrlenu(move_poses); ++i) {
+      Vector2i pos = move_poses[i];
+      if (v2i_eq(pos, fix_to_tile_space(clock_mpos_world(ctx)))) {
+	draw_hover_piece = true;
+	Sprite_set_hframe(hovering_piece_sprite, selected_piece->spr.hframe);
+	Vector2i p = fix_to_tile_space(clock_mpos_world(ctx));
+	hovering_piece_sprite->pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};;
+      }
+    }
+
+    for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) {
+      Vector2i pos = mr.eatable_piece_ptrs[i]->pos;
+      if (v2i_eq(pos, fix_to_tile_space(clock_mpos_world(ctx)))) {
+	draw_hover_piece = true;
+	Sprite_set_hframe(hovering_piece_sprite, selected_piece->spr.hframe);
+	Vector2i p = fix_to_tile_space(clock_mpos_world(ctx));
+	hovering_piece_sprite->pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};;
+      }
+    }
+
+    for (int i = 0; i < arrlenu(move_poses); ++i) {
+      Vector2i pos = move_poses[i];
+
+      draw_box(ctx, (Rect) {
+	  .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+	  .size = (Vector2f) {(float)tile_size, (float)tile_size}
+	},
+	MOVABLE_TILE_COLOR,
+	color_alpha(MOVABLE_TILE_COLOR, 0.3f));
+    }
+
+    for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) {
+      Vector2i pos = mr.eatable_piece_ptrs[i]->pos;
+
+      draw_box(ctx, (Rect) {
+	  .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+	  .size = (Vector2f) {(float)tile_size, (float)tile_size}
+	},
+	EATABLE_PIECE_COLOR,
+	color_alpha(EATABLE_PIECE_COLOR, 0.3f));
+    }
+
+    free_movement_results(mr);
+  }
+
+  // draw hover piece
+  if (draw_hover_piece) {
+    draw_sprite(ctx, hovering_piece_sprite);
+  }
+
+  // black check
+  if (black_check)
+    draw_check(ctx, white_checking_piece, black_king);
+  if (white_check)
+    draw_check(ctx, black_checking_piece, white_king);
+
+#ifdef DEBUG
+  {
+    Vector2f pos = {0.f, 0.f};
+    draw_text(ctx, font, (white_turn ? "White turn" : "Black turn"), pos, CHAR_SIZE, COLOR_WHITE);
+    draw_text(ctx, font, (white_turn ? "White turn" : "Black turn"), v2f_subs(pos, 2.f), CHAR_SIZE, COLOR_BLACK);
+  }
+  // dev_mode indicator
+  if (dev_mode) {
+    if (black_king) {
+      Vector2i pos = black_king->pos;
+      draw_box(ctx, (Rect) {
+	  .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+	  .size = (Vector2f) {(float)tile_size, (float)tile_size}
+	},
+	BLACK_KING_COLOR,
+	color_alpha(BLACK_KING_COLOR, 0.3f));
+
+      Vector2f text_pos = v2i_to_v2f(v2i_add(pos, (Vector2i) {tile_size, tile_size}));
+
+      draw_text(ctx, font, "Black King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
+      draw_text(ctx, font, "Black King", text_pos, 18, COLOR_WHITE);
+
+      draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
+    }
+
+    if (white_king) {
+      Vector2i pos = white_king->pos;
+      draw_box(ctx, (Rect) {
+	  .pos = (Vector2f) {(float)pos.x, (float)pos.y},
+	  .size = (Vector2f) {(float)tile_size, (float)tile_size}
+	},
+	WHITE_KING_COLOR,
+	color_alpha(WHITE_KING_COLOR, 0.3f));
+      Vector2f text_pos = v2i_to_v2f(v2i_sub(pos, (Vector2i) {tile_size, tile_size}));
+
+      draw_text(ctx, font, "White King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
+      draw_text(ctx, font, "White King", text_pos, 18, COLOR_WHITE);
+
+      draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
+
+    }
+  }
+
+  clock_use_camera_view(ctx, false);
+}
+
 #ifdef DEBUG
 int main(void) {
   #else
@@ -988,24 +1147,24 @@ int WinMain(HINSTANCE instance,
 
   Context* ctx = clock_init(960, 960, 1.f, 1.f, "Chess", WINDOW_VSYNC);
 
+  Arena str_arena = Arena_make(0);
+
+  board_rect = (Rect) {
+    .pos = {0.f, 0.f},
+    .size = {960.f, 960.f},
+  };
+
   if (!ctx) return 1;
 
   tile_size = (ctx->win->width/cols);
 
   init_pieces(ctx);
 
-  Font font = {0};
-  if (!Font_init_from_file(&font, ctx, "resources/fonts/WayfarersToyBoxRegular-gxxER.ttf")) {
-    return 1;
-  }
-
-  bool dev_mode = false;
-  bool user_control_all_pieces = false;
+  Font font = ctx->default_font;
 
 #ifdef DEBUG
 
-  UI ui = UI_make(ctx, &font);
-  Vector2f ui_pos = {0.f, 0.f};
+  UI ui = UI_make(ctx, &font, (Vector2f) {0.f, 0.f}, "Debug");
 #endif
   Sprite hovering_piece_sprite = {0};
   if (!Sprite_init(&hovering_piece_sprite, Resman_load_texture_from_file(ctx->resman, "resources/gfx/piece_sheet.png"), PIECE_TYPE_COUNT*2, 1)) return 1;
@@ -1039,152 +1198,7 @@ int WinMain(HINSTANCE instance,
     // Draw
     //
 
-    // draw checker pattern
-    for (int y = 0; y < rows; ++y) {
-      for (int x = 0; x < cols; ++x) {
-	Color col = color_from_hex(0XFFF0F6F0);
-	if (y % 2 != x % 2) col = color_from_hex(0xFF232322);
-	draw_rect(ctx, (Rect) {
-	    .pos = (Vector2f) {(float)x*tile_size, (float)y*tile_size},
-	    .size = (Vector2f) {(float)tile_size, (float)tile_size}},
-	  col);
-      }
-    }
-
-    // draw coords
-    for (int y = 0; y < rows; ++y) {
-      for (int x = 0; x < cols; ++x) {
-	Vector2f pos_in_screen_space = {x*tile_size*1.f, y*tile_size*1.f};
-
-	cstr coord_str = "";
-	temp_sprintf(coord_str, "%c%c", x_coord_strs[x], y_coord_strs[rows-1-y]);
-	draw_text(ctx, &font, coord_str, pos_in_screen_space, 24, color_alpha(COORDINATE_COLOR, (clock_key_held(ctx, KEY_LEFT_ALT) ? 0.75f : 0.2f)));
-      }
-    }
-
-    // draw pieces
-    for (int i = 0; i < arrlenu(pieces); ++i) {
-      Piece* p = &pieces[i];
-      draw_piece(p);
-    }
-
-
-    // draw selection
-    if (selected_piece) {
-      Sprite_set_hframe(&selected_tile_spr, (is_tile_white(selected_piece->pos) ? 1 : 0));
-      draw_sprite_at(ctx, &selected_tile_spr, (Vector2f) {(float)selected_piece->pos.x + tile_size/2.f, (float)selected_piece->pos.y + tile_size/2.f});
-      /* draw_box(ctx, (Rect) { */
-      /* 	  .pos = (Vector2f) {(float)selected_piece->pos.x, (float)selected_piece->pos.y}, */
-      /* 	  .size = (Vector2f) {(float)tile_size, (float)tile_size} */
-      /* 	}, */
-      /*   SELECTED_PIECE_COLOR, */
-      /* 	color_alpha(SELECTED_PIECE_COLOR, 0.5f)); */
-
-      Movement_result mr =  get_piece_movement_positions(selected_piece);
-      Vector2i* move_poses = mr.movements;
-
-      draw_hover_piece = false;
-      // hovering piece checking
-      for (int i = 0; i < arrlenu(move_poses); ++i) {
-        Vector2i pos = move_poses[i];
-	if (v2i_eq(pos, fix_to_tile_space(ctx->mpos))) {
-	  draw_hover_piece = true;
-	  Sprite_set_hframe(&hovering_piece_sprite, selected_piece->spr.hframe);
-	  Vector2i p = fix_to_tile_space(ctx->mpos);
-	  hovering_piece_sprite.pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};;
-	}
-      }
-
-      for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) {
-        Vector2i pos = mr.eatable_piece_ptrs[i]->pos;
-	if (v2i_eq(pos, fix_to_tile_space(ctx->mpos))) {
-	  draw_hover_piece = true;
-	  Sprite_set_hframe(&hovering_piece_sprite, selected_piece->spr.hframe);
-	  Vector2i p = fix_to_tile_space(ctx->mpos);
-	  hovering_piece_sprite.pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};;
-	}
-      }
-
-      for (int i = 0; i < arrlenu(move_poses); ++i) {
-        Vector2i pos = move_poses[i];
-
-	draw_box(ctx, (Rect) {
-	    .pos = (Vector2f) {(float)pos.x, (float)pos.y},
-	    .size = (Vector2f) {(float)tile_size, (float)tile_size}
-	    },
-	  MOVABLE_TILE_COLOR,
-	  color_alpha(MOVABLE_TILE_COLOR, 0.3f));
-      }
-
-      for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) {
-        Vector2i pos = mr.eatable_piece_ptrs[i]->pos;
-
-	draw_box(ctx, (Rect) {
-	    .pos = (Vector2f) {(float)pos.x, (float)pos.y},
-	    .size = (Vector2f) {(float)tile_size, (float)tile_size}
-	    },
-	  EATABLE_PIECE_COLOR,
-	  color_alpha(EATABLE_PIECE_COLOR, 0.3f));
-      }
-
-      free_movement_results(mr);
-    }
-
-    // draw hover piece
-    if (draw_hover_piece) {
-      draw_sprite(ctx, &hovering_piece_sprite);
-    }
-
-    // black check
-    if (black_check)
-      draw_check(ctx, white_checking_piece, black_king);
-    if (white_check)
-      draw_check(ctx, black_checking_piece, white_king);
-
-#ifdef DEBUG
-    {
-      Vector2f pos = {0.f, 0.f};
-      draw_text(ctx, &font, (white_turn ? "White turn" : "Black turn"), pos, 24, COLOR_WHITE);
-      draw_text(ctx, &font, (white_turn ? "White turn" : "Black turn"), v2f_subs(pos, 2.f), 24, COLOR_BLACK);
-    }
-    // dev_mode indicator
-    if (dev_mode) {
-      draw_text(ctx, &font, "Dev_mode", (Vector2f) {0.f, 0.f}, 12, COLOR_RED);
-
-      if (black_king) {
-	Vector2i pos = black_king->pos;
-	draw_box(ctx, (Rect) {
-	    .pos = (Vector2f) {(float)pos.x, (float)pos.y},
-	    .size = (Vector2f) {(float)tile_size, (float)tile_size}
-	  },
-	  BLACK_KING_COLOR,
-	  color_alpha(BLACK_KING_COLOR, 0.3f));
-
-	Vector2f text_pos = v2i_to_v2f(v2i_add(pos, (Vector2i) {tile_size, tile_size}));
-
-	draw_text(ctx, &font, "Black King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
-	draw_text(ctx, &font, "Black King", text_pos, 18, COLOR_WHITE);
-
-	draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
-      }
-
-      if (white_king) {
-	Vector2i pos = white_king->pos;
-	draw_box(ctx, (Rect) {
-	    .pos = (Vector2f) {(float)pos.x, (float)pos.y},
-	    .size = (Vector2f) {(float)tile_size, (float)tile_size}
-	  },
-	  WHITE_KING_COLOR,
-	  color_alpha(WHITE_KING_COLOR, 0.3f));
-	Vector2f text_pos = v2i_to_v2f(v2i_sub(pos, (Vector2i) {tile_size, tile_size}));
-
-	draw_text(ctx, &font, "White King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
-	draw_text(ctx, &font, "White King", text_pos, 18, COLOR_WHITE);
-
-	draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
-
-      }
-    }
+    draw_board(ctx, &font, &selected_tile_spr, &hovering_piece_sprite);
 
 #endif
     //
@@ -1193,12 +1207,12 @@ int WinMain(HINSTANCE instance,
 
 #ifdef DEBUG
     if (dev_mode) {
-      UI_begin(&ui, &ui_pos, UI_LAYOUT_KIND_VERT);
-
-      Arena str_arena = Arena_make(0);
+      UI_begin(&ui, UI_LAYOUT_KIND_VERT);
 
       /* cstr checked_king_str = Arena_alloc_str(str_arena, "Checked king: %p", checked_king); */
       /* UI_text(&ui, checked_king_str, 24, COLOR_GOLD); */
+
+      Arena_reset(&str_arena);
 
       Piece** black_piece_ptrs = get_black_piece_ptrs();
       cstr black_pieces_count_str = Arena_alloc_str(str_arena, "Black_pcs count: %zu", arrlenu(black_piece_ptrs));
@@ -1226,8 +1240,6 @@ int WinMain(HINSTANCE instance,
       UI_text(&ui, controlling_black_pieces_str, 24, COLOR_GOLD);
 
       UI_end(&ui);
-
-      Arena_free(&str_arena);
     }
 #endif
 
@@ -1238,6 +1250,21 @@ int WinMain(HINSTANCE instance,
     // change turn
     if (clock_key_pressed(ctx, KEY_SPACE)) {
       change_turn();
+    }
+
+    // TEMP: camera testing
+    const float S = 100.f;
+    if (clock_key_held(ctx, KEY_LEFT)) {
+      ctx->camera.x -= S * ctx->delta;
+    }
+    if (clock_key_held(ctx, KEY_RIGHT)) {
+      ctx->camera.x += S * ctx->delta;
+    }
+    if (clock_key_held(ctx, KEY_UP)) {
+      ctx->camera.y -= S * ctx->delta;
+    }
+    if (clock_key_held(ctx, KEY_DOWN)) {
+      ctx->camera.y += S * ctx->delta;
     }
 
     // dev_mode
@@ -1289,10 +1316,10 @@ int WinMain(HINSTANCE instance,
     clock_end_draw(ctx);
   }
 
+  Arena_free(&str_arena);
   Sprite_deinit(&hovering_piece_sprite);
   Sprite_deinit(&selected_tile_spr);
   UI_free(&ui);
-  Font_deinit(&font);
   clock_deinit(ctx);
 
   return 0;
