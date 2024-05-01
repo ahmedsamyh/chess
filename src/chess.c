@@ -2,8 +2,8 @@
 #include <time.h>
 
 // TODO: Implement Castling
-// TODO: Implement Checkmate
-// TODO: Implement Check
+// TODO: Implement Checkmate for user // ai done
+// TODO: Implement Check for user     // ai done
 // TODO: Implement Transformation of Pawn to any piece except Pawn and King when they are at the base of the opponent
 // NOTE: Check is when king is in eatable but can king can move to safety or another piece can shield the king.
 // NOTE: Checkmate is when king is in eatable and not the above
@@ -49,10 +49,15 @@ static bool white_checkmate = false;
 
 static bool dev_mode = false;
 static bool user_control_all_pieces = false;
-
+static bool ai_control_pieces = true;
 
 static void change_turn(void) {
-  white_turn = !white_turn;
+  if (white_turn) {
+    if (ai_control_pieces)
+      white_turn = false;
+  } else {
+    white_turn = true;
+  }
 }
 
 typedef struct {
@@ -143,6 +148,73 @@ inline cstr get_piece_type_str(const Piece_type type) {
   default: ASSERT(0 && "Unreachable!");
   }
   return "THIS SHOULD NOT BE VISIBLE!";
+}
+
+typedef enum {
+  UNDO_CMD_TYPE_MOVE,
+  UNDO_CMD_TYPE_SPAWN,
+  UNDO_CMD_TYPE_REMOVE,
+  UNDO_CMD_TYPE_COUNT,
+} Undo_cmd_type;
+
+typedef struct {
+  Undo_cmd_type type;
+  Vector2i piece_pos;
+  Piece_type piece_type;
+  bool piece_black;
+  Piece* moving_piece;
+} Undo_cmd;
+
+#define UNDO_CMD_STACK_CAP (1024*2)
+typedef struct {
+  Undo_cmd buff[UNDO_CMD_STACK_CAP];
+  size_t count;
+} Undo_cmd_stack;
+
+void Undo_cmd_stack_push(Undo_cmd_stack* stack, Undo_cmd value) {
+  ASSERT((stack->count + 1) <= UNDO_CMD_STACK_CAP);
+
+  stack->buff[stack->count++] = value;
+}
+
+bool Undo_cmd_stack_pop(Undo_cmd_stack* stack, Undo_cmd* popped) {
+  if (stack->count == 0) {
+    return false;
+  }
+
+  *popped = stack->buff[--stack->count];
+
+  return true;
+}
+
+bool Undo_cmd_stack_top(Undo_cmd_stack* stack, Undo_cmd* top) {
+  if (stack->count == 0) {
+    return false;
+  }
+
+  *top = stack->buff[stack->count - 1];
+
+  return true;
+}
+
+static Undo_cmd_stack undo_cmd_stack = {0};
+
+/* typedef struct { */
+/*   int key; */
+/*   Piece* value; */
+/* } Undo_cmd_move_correction_KV; */
+
+/* static Undo_cmd_move_correction_KV* undo_cmd_move_corrections = NULL; // hashmap */
+
+static void correct_undo_move(Piece* spawned_piece) {
+  for (int i = (int)(undo_cmd_stack.count-1); i >= 0; --i) {
+    Undo_cmd* cmd = &undo_cmd_stack.buff[i];
+    if (cmd->type == UNDO_CMD_TYPE_MOVE) {
+      cmd->moving_piece = spawned_piece;
+      return;
+    }
+  }
+  ASSERT(0 && "Unreachable!");
 }
 
 struct Piece {
@@ -459,10 +531,12 @@ inline void offset_piece_when_removing_piece(Piece** piece, Piece* removing_piec
 
 // TODO (speed): better way to remove piece
 void remove_piece(Piece* removing_piece) {
-  offset_piece_when_removing_piece(&black_king, removing_piece);
-  offset_piece_when_removing_piece(&white_king, removing_piece);
-  if (white_checking_piece) offset_piece_when_removing_piece(&white_checking_piece, removing_piece);
-  if (black_checking_piece) offset_piece_when_removing_piece(&black_checking_piece, removing_piece);
+  Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+      .type = UNDO_CMD_TYPE_SPAWN,
+      .piece_pos = removing_piece->pos,
+      .piece_type = removing_piece->type,
+      .piece_black = removing_piece->black,
+    });
 
   for (int i = 0; i < arrlenu(pieces); ++i) {
     if (&pieces[i] == removing_piece) {
@@ -470,6 +544,11 @@ void remove_piece(Piece* removing_piece) {
       arrdel(pieces, i);
     }
   }
+
+  offset_piece_when_removing_piece(&black_king, removing_piece);
+  offset_piece_when_removing_piece(&white_king, removing_piece);
+  if (white_checking_piece) offset_piece_when_removing_piece(&white_checking_piece, removing_piece);
+  if (black_checking_piece) offset_piece_when_removing_piece(&black_checking_piece, removing_piece);
 }
 
 bool move_piece_to(Piece** piece_ptr, Vector2i to) {
@@ -490,6 +569,11 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
       piece->moving = true;
       moved = true;
       remove_eated_piece = true;
+      Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	  .type = UNDO_CMD_TYPE_MOVE,
+	  .piece_pos = piece->pos,
+	  .moving_piece = piece,
+	});
       break;
     }
   }
@@ -498,10 +582,11 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
       eated_piece) {
     ASSERT(eated_piece != piece);
 
-    Piece_removal_entry entry =  {
+    Piece_removal_entry entry = {
       .eating_piece = piece,
       .eated_piece = eated_piece
     };
+
     ASSERT(entry.eating_piece->black != entry.eated_piece->black);
     arrput(piece_removal_entries, entry);
   }
@@ -511,9 +596,13 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
     Vector2i pos = move_poses[i];
     if (v2i_eq(pos, to)) {
       piece->to = to;
-      /* piece->pos = to; */
       piece->moving = true;
       moved = true;
+      Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	  .type = UNDO_CMD_TYPE_MOVE,
+	  .piece_pos = piece->pos,
+	  .moving_piece = piece,
+	});
       break;
     }
   }
@@ -525,6 +614,19 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
   }
 
   return moved;
+}
+
+bool spawn_piece(Context* ctx, const Piece_type type, Vector2i pos, bool black) {
+  Piece p = {0};
+  if (!init_piece(&p, ctx, type, black)) {
+    return false;
+  }
+
+  p.pos = pos;
+
+  arrput(pieces, p);
+
+  return true;
 }
 
 bool add_piece(Context* ctx, const Piece_type type, int y_offset, int* xs, size_t xs_size) {
@@ -557,28 +659,73 @@ void reset_variables(void) {
 }
 
 bool is_piece_in_danger(Piece* piece) {
-  for (int i = 0; i < arrlenu(pieces); ++i) {
-    if (pieces[i].black == piece->black) continue;
+  if (!piece->black) {
+    Piece** black_piece_ptrs = get_black_piece_ptrs();
 
-    Movement_result mr = get_piece_movement_positions(&pieces[i]);
+    black_checking_piece = NULL;
+    for (int i = 0; i < arrlen(black_piece_ptrs); ++i) {
+      Movement_result mr = get_piece_movement_positions(black_piece_ptrs[i]);
 
-    for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
-      if (mr.eatable_piece_ptrs[j] == piece) {
-	if (piece->black) {
-	  white_checking_piece = &pieces[i];
-	} else {
-	  black_checking_piece = &pieces[i];
+      for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
+	if (mr.eatable_piece_ptrs[j] == piece) {
+	  ASSERT(!piece->black);
+	  black_checking_piece = black_piece_ptrs[i];
 	}
-	return true;
       }
+
+      free_movement_results(mr);
+      if (black_checking_piece != NULL) break;
     }
 
-    free_movement_results(mr);
-  }
-  white_checking_piece = NULL;
-  black_checking_piece = NULL;
+    arrfree(black_piece_ptrs);
 
-  return false;
+    return black_checking_piece != NULL;
+  } else {
+    Piece** white_piece_ptrs = get_white_piece_ptrs();
+
+    white_checking_piece = NULL;
+    for (int i = 0; i < arrlen(white_piece_ptrs); ++i) {
+      Movement_result mr = get_piece_movement_positions(white_piece_ptrs[i]);
+
+      for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
+	if (mr.eatable_piece_ptrs[j] == piece) {
+	  ASSERT(piece->black);
+	  white_checking_piece = white_piece_ptrs[i];
+	}
+      }
+
+      free_movement_results(mr);
+      if (white_checking_piece != NULL) break;
+    }
+
+    arrfree(white_piece_ptrs);
+
+    return white_checking_piece != NULL;
+  }
+
+
+
+  /* for (int i = 0; i < arrlenu(pieces); ++i) { */
+  /*   if (pieces[i].black == piece->black) continue; */
+
+  /*   Movement_result mr = get_piece_movement_positions(&pieces[i]); */
+
+  /*   for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) { */
+  /*     if (mr.eatable_piece_ptrs[j] == piece) { */
+  /* 	if (piece->black) { */
+  /* 	  white_checking_piece = &pieces[i]; */
+  /* 	  black_checking_piece = NULL; */
+  /* 	} else { */
+  /* 	  black_checking_piece = &pieces[i]; */
+  /* 	  white_checking_piece = NULL; */
+  /* 	} */
+  /* 	return true; */
+  /*     } */
+  /*   } */
+
+  /*   free_movement_results(mr); */
+  /* } */
+  /* return false; */
 }
 
 /* bool move_is_check(Piece* piece, Piece** checked_piece) { */
@@ -798,6 +945,12 @@ static bool ai_protect_checked_king(void) {
 	p->moving = false;
       } else {
 	protected = true;
+	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	  .type = UNDO_CMD_TYPE_MOVE,
+	  .piece_pos = p->pos,
+	  .moving_piece = p,
+	});
+
 	break;
       }
     }
@@ -826,6 +979,11 @@ static bool ai_eat_checking_piece(void) {
 	eating_piece = p;
 	p->to = white_checking_piece->pos;
 	p->moving = true;
+	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	    .type = UNDO_CMD_TYPE_MOVE,
+	    .piece_pos = p->pos,
+	    .moving_piece = p,
+	  });
         ate_checking_piece = true;
 	free_movement_results(mr);
 	goto done;
@@ -912,11 +1070,6 @@ void ai_control_piece(Context* ctx) {
 }
 
 void user_control_piece(Context* ctx, bool can_control_black) {
-  if (white_check) {
-
-    return;
-  }
-
   if (clock_mouse_pressed(ctx, MOUSE_BUTTON_LEFT)) {
     if (selected_piece) {
       if (move_piece_to(&selected_piece, fix_to_tile_space(ctx->mpos))) {
@@ -952,8 +1105,8 @@ static void remove_pieces_marked_for_removal(void) {
 }
 
 static void draw_check(Context* ctx, Piece* checking_piece, Piece* checked_king) {
-  ASSERT(checking_piece);
-  ASSERT(checked_king);
+  if (!checking_piece) return;
+  if (!checked_king) return;
   Vector2i pos = checked_king->pos;
   draw_box(ctx, (Rect) {
       .pos = (Vector2f) {(float)pos.x, (float)pos.y},
@@ -1208,36 +1361,41 @@ int WinMain(HINSTANCE instance,
 #ifdef DEBUG
     if (dev_mode) {
       UI_begin(&ui, UI_LAYOUT_KIND_VERT);
+      Arena_reset(&str_arena);
 
       /* cstr checked_king_str = Arena_alloc_str(str_arena, "Checked king: %p", checked_king); */
-      /* UI_text(&ui, checked_king_str, 24, COLOR_GOLD); */
+      /* UI_text(&ui, checked_king_str, 24, COLOR_WHITE); */
 
-      Arena_reset(&str_arena);
+      cstr undo_cmd_stack_count_str = Arena_alloc_str(str_arena, "Undo stack count: %zu", undo_cmd_stack.count);
+      UI_text(&ui, undo_cmd_stack_count_str, 24, COLOR_WHITE);
 
       Piece** black_piece_ptrs = get_black_piece_ptrs();
       cstr black_pieces_count_str = Arena_alloc_str(str_arena, "Black_pcs count: %zu", arrlenu(black_piece_ptrs));
-      UI_text(&ui, black_pieces_count_str, 24, COLOR_GOLD);
+      UI_text(&ui, black_pieces_count_str, 24, COLOR_WHITE);
       arrfree(black_piece_ptrs);
 
       Piece** white_piece_ptrs = get_white_piece_ptrs();
       cstr white_pieces_count_str = Arena_alloc_str(str_arena, "White_pcs count: %zu", arrlenu(white_piece_ptrs));
-      UI_text(&ui, white_pieces_count_str, 24, COLOR_GOLD);
+      UI_text(&ui, white_pieces_count_str, 24, COLOR_WHITE);
       arrfree(white_piece_ptrs);
 
-      /* cstr black_check_str = Arena_alloc_str(str_arena, "black check: %s", (black_check ? "true" : "false")); */
-      /* UI_text(&ui, black_check_str, 24, COLOR_GOLD); */
+      cstr black_check_str = Arena_alloc_str(str_arena, "black check: %s", (black_check ? "true" : "false"));
+      UI_text(&ui, black_check_str, 24, COLOR_WHITE);
 
-      /* cstr white_check_str = Arena_alloc_str(str_arena, "white check: %s", (white_check ? "true" : "false")); */
-      /* UI_text(&ui, white_check_str, 24, COLOR_GOLD); */
+      cstr white_check_str = Arena_alloc_str(str_arena, "white check: %s", (white_check ? "true" : "false"));
+      UI_text(&ui, white_check_str, 24, COLOR_WHITE);
 
       cstr black_checking_piece_str = Arena_alloc_str(str_arena, "black checking piece: %p", black_checking_piece);
-      UI_text(&ui, black_checking_piece_str, 24, COLOR_GOLD);
+      UI_text(&ui, black_checking_piece_str, 24, COLOR_WHITE);
 
       cstr white_checking_piece_str = Arena_alloc_str(str_arena, "white checking piece: %p", white_checking_piece);
-      UI_text(&ui, white_checking_piece_str, 24, COLOR_GOLD);
+      UI_text(&ui, white_checking_piece_str, 24, COLOR_WHITE);
 
       cstr controlling_black_pieces_str = Arena_alloc_str(str_arena, "Controlling all pieces: %s", (user_control_all_pieces ? "true" : "false"));
-      UI_text(&ui, controlling_black_pieces_str, 24, COLOR_GOLD);
+      UI_text(&ui, controlling_black_pieces_str, 24, COLOR_WHITE);
+
+      cstr ai_control_pieces_str = Arena_alloc_str(str_arena, "AI Control pieces: %s", (ai_control_pieces ? "true" : "false"));
+      UI_text(&ui, ai_control_pieces_str, 24, COLOR_WHITE);
 
       UI_end(&ui);
     }
@@ -1277,15 +1435,44 @@ int WinMain(HINSTANCE instance,
       user_control_all_pieces = !user_control_all_pieces;
       white_turn = true;
     }
+
+    if (clock_key_pressed(ctx, KEY_F3)) {
+      ai_control_pieces = !ai_control_pieces;
+      white_turn = true;
+    }
 #endif
 
     // reset
-    if (clock_key_pressed(ctx, KEY_R)) {
-      init_pieces(ctx);
+    if (clock_key_held(ctx, KEY_LEFT_CONTROL)) {
+      if (clock_key_pressed(ctx, KEY_R)) {
+	init_pieces(ctx);
+      }
+
+      // undo
+      if (clock_key_pressed(ctx, KEY_Z)) {
+	Undo_cmd undo_cmd = {0};
+	if (Undo_cmd_stack_pop(&undo_cmd_stack, &undo_cmd)) {
+	  switch (undo_cmd.type) {
+	  case UNDO_CMD_TYPE_MOVE: {
+	    undo_cmd.moving_piece->moving = true;
+	    undo_cmd.moving_piece->to = undo_cmd.piece_pos;
+	  } break;
+	  case UNDO_CMD_TYPE_SPAWN: {
+	    if (!spawn_piece(ctx, undo_cmd.piece_type, undo_cmd.piece_pos, undo_cmd.piece_black)) {
+	      // TODO: quit
+	      return;
+	    }
+	    correct_undo_move(&pieces[arrlenu(pieces)-1]);
+	  } break;
+	  case UNDO_CMD_TYPE_REMOVE: {
+	  } break;
+	  default: ASSERT(0 && "Unreachable!");
+	  }
+	}
+      }
     }
 
     // move piece
-
     if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
       if (white_turn) {
 	user_control_piece(ctx, user_control_all_pieces);
