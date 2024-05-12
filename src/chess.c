@@ -1,6 +1,7 @@
 #include <clock/clock.h>
 #include <time.h>
 
+// TODO: Prevent ai from making moves that will leave the king in check
 // TODO: Implement Castling
 // TODO: Implement Checkmate for user // ai done
 // TODO: Implement Check for user     // ai done
@@ -163,6 +164,7 @@ typedef struct {
   Piece_type piece_type;
   bool piece_black;
   Piece* moving_piece;
+  bool was_first_move;
 } Undo_cmd;
 
 #define UNDO_CMD_STACK_CAP (1024*2)
@@ -573,6 +575,7 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
 	  .type = UNDO_CMD_TYPE_MOVE,
 	  .piece_pos = piece->pos,
 	  .moving_piece = piece,
+	  .was_first_move = !piece->moved_once,
 	});
       break;
     }
@@ -602,12 +605,11 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
 	  .type = UNDO_CMD_TYPE_MOVE,
 	  .piece_pos = piece->pos,
 	  .moving_piece = piece,
+	  .was_first_move = !piece->moved_once,
 	});
       break;
     }
   }
-
-  free_movement_results(mr);
 
   if (!piece->moved_once && moved) {
     piece->moved_once = true;
@@ -949,6 +951,7 @@ static bool ai_protect_checked_king(void) {
 	  .type = UNDO_CMD_TYPE_MOVE,
 	  .piece_pos = p->pos,
 	  .moving_piece = p,
+	  .was_first_move = !p->moved_once
 	});
 
 	break;
@@ -983,6 +986,7 @@ static bool ai_eat_checking_piece(void) {
 	    .type = UNDO_CMD_TYPE_MOVE,
 	    .piece_pos = p->pos,
 	    .moving_piece = p,
+	    .was_first_move = !p->moved_once,
 	  });
         ate_checking_piece = true;
 	free_movement_results(mr);
@@ -1456,6 +1460,9 @@ int WinMain(HINSTANCE instance,
 	  case UNDO_CMD_TYPE_MOVE: {
 	    undo_cmd.moving_piece->moving = true;
 	    undo_cmd.moving_piece->to = undo_cmd.piece_pos;
+	    if (undo_cmd.was_first_move) {
+	      undo_cmd.moving_piece->moved_once = false;
+	    }
 	  } break;
 	  case UNDO_CMD_TYPE_SPAWN: {
 	    if (!spawn_piece(ctx, undo_cmd.piece_type, undo_cmd.piece_pos, undo_cmd.piece_black)) {
