@@ -4,7 +4,6 @@
 // TODO: Prevent ai from making moves that will leave the king in check
 // TODO: Implement Castling
 // TODO: Implement Checkmate for user // ai done
-// TODO: Implement Check for user     // ai done
 // TODO: Implement Transformation of Pawn to any piece except Pawn and King when they are at the base of the opponent
 // NOTE: Check is when king is in eatable but can king can move to safety or another piece can shield the king.
 // NOTE: Checkmate is when king is in eatable and not the above
@@ -32,6 +31,7 @@ static Rect board_rect = {0};
 #define WHITE_KING_COLOR COLOR_GREEN
 
 static Piece* pieces = NULL; // dynamic-array
+static Piece** pseudo_removed_pieces = NULL; // dynamic-array
 static Piece* selected_piece = NULL;
 
 static Piece* white_checking_piece = NULL;
@@ -184,7 +184,11 @@ bool Undo_cmd_stack_pop(Undo_cmd_stack* stack, Undo_cmd* popped) {
     return false;
   }
 
-  *popped = stack->buff[--stack->count];
+  if (popped) {
+    *popped = stack->buff[--stack->count];
+  } else {
+    --stack->count;
+  }
 
   return true;
 }
@@ -209,6 +213,7 @@ static Undo_cmd_stack undo_cmd_stack = {0};
 /* static Undo_cmd_move_correction_KV* undo_cmd_move_corrections = NULL; // hashmap */
 
 static void correct_undo_move(Piece* spawned_piece) {
+  if (undo_cmd_stack.count == 0) return;
   for (int i = (int)(undo_cmd_stack.count-1); i >= 0; --i) {
     Undo_cmd* cmd = &undo_cmd_stack.buff[i];
     if (cmd->type == UNDO_CMD_TYPE_MOVE) {
@@ -318,7 +323,7 @@ inline void free_movement_results(Movement_result mr) {
 }
 
 // caller must be responsible for freeing the result
-Movement_result get_piece_movement_positions(Piece* piece) {
+Movement_result get_piece_moves(Piece* piece) {
   Movement_result res = {0};
   Vector2i* offsets = NULL; // dynamic-array
   switch (piece->type) {
@@ -381,7 +386,8 @@ Movement_result get_piece_movement_positions(Piece* piece) {
   default: ASSERT(0 && "Unreachable");
   }
 
-  for (int i = 0; i < arrlenu(offsets); ++i) {
+  size_t offsets_count = arrlenu(offsets);
+  for (int i = 0; i < offsets_count; ++i) {
     Vector2i offset = offsets[i];
     Vector2i pos = v2i_add(piece->pos, v2i_muls(offset, tile_size));
     if (is_pos_in_bounds_in_screen_space(pos)) {
@@ -486,6 +492,7 @@ Vector2i tile_to_screen_space(Vector2i tile_space) {
 }
 
 bool animate_piece_moving(int delta) {
+  bool moving = false;
   for (int i = 0; i < arrlenu(pieces); ++i) {
     Piece* piece = &pieces[i];
     if (piece->moving) {
@@ -519,10 +526,10 @@ bool animate_piece_moving(int delta) {
       if (v2i_eq(piece->pos, piece->to)) {
 	piece->moving = false;
       }
-      return true;
+      moving = true;
     }
   }
-  return false;
+  return moving;
 }
 
 inline void offset_piece_when_removing_piece(Piece** piece, Piece* removing_piece) {
@@ -531,8 +538,31 @@ inline void offset_piece_when_removing_piece(Piece** piece, Piece* removing_piec
   }
 }
 
+void pseudo_remove_piece(Piece* removing_piece) {
+  arrput(pseudo_removed_pieces, removing_piece);
+}
+
+void pseudo_unremove_piece(Piece* unremoving_piece) {
+  for (int i = 0; i < arrlenu(pseudo_removed_pieces); ++i) {
+    if (unremoving_piece == pseudo_removed_pieces[i]) {
+      arrdel(pseudo_removed_pieces, i);
+      break;
+    }
+  }
+}
+
+bool is_piece_pseudo_removed(Piece* piece) {
+  for (int i = 0; i < arrlenu(pseudo_removed_pieces); ++i) {
+    if (piece == pseudo_removed_pieces[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // TODO (speed): better way to remove piece
 void remove_piece(Piece* removing_piece) {
+  // NOTE: Doesn't leak
   Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
       .type = UNDO_CMD_TYPE_SPAWN,
       .piece_pos = removing_piece->pos,
@@ -553,11 +583,49 @@ void remove_piece(Piece* removing_piece) {
   if (black_checking_piece) offset_piece_when_removing_piece(&black_checking_piece, removing_piece);
 }
 
-bool move_piece_to(Piece** piece_ptr, Vector2i to) {
+
+static bool get_move_idx(Piece* piece, Vector2i to, int* movement_idx, int* eating_piece_idx) {
+  ASSERT(piece);
+
+  bool found = false;
+
+  Movement_result mr = get_piece_moves(piece);
+  size_t movements_count = arrlenu(mr.movements);
+  if (movements_count > 0) {
+    for (int i = 0; i < movements_count; ++i) {
+      Vector2i p = mr.movements[i];
+      if (v2i_eq(p, to)) {
+	*movement_idx = i;
+	found = true;
+	break;
+      }
+    }
+  }
+
+
+  if (!found) {
+    size_t eatable_pieces_count = arrlenu(mr.eatable_piece_ptrs);
+    if (eatable_pieces_count > 0) {
+      for (int i = 0; i < eatable_pieces_count; ++i) {
+	Piece* p = mr.eatable_piece_ptrs[i];
+	if (v2i_eq(p->pos, to)) {
+	  *eating_piece_idx = i;
+	  found = true;
+	  break;
+	}
+      }
+    }
+  }
+
+  free_movement_results(mr);
+  return found;
+}
+
+// NOTE: mr should not be freed in this function!!!
+static bool move_piece_to(Piece** piece_ptr, Vector2i to, Movement_result mr, bool record_undo) {
   Piece* piece = *piece_ptr;
+  if (v2i_eq(piece->pos, to)) return false;
   if (!piece) return false;
-  Movement_result mr = get_piece_movement_positions(piece);
-  Vector2i* move_poses = mr.movements;
 
   bool moved = false;
 
@@ -571,12 +639,15 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
       piece->moving = true;
       moved = true;
       remove_eated_piece = true;
-      Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
-	  .type = UNDO_CMD_TYPE_MOVE,
-	  .piece_pos = piece->pos,
-	  .moving_piece = piece,
-	  .was_first_move = !piece->moved_once,
-	});
+      if (record_undo) {
+	// NOTE: Doesn't leak
+	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	    .type = UNDO_CMD_TYPE_MOVE,
+	    .piece_pos = piece->pos,
+	    .moving_piece = piece,
+	    .was_first_move = !piece->moved_once,
+	  });
+      }
       break;
     }
   }
@@ -595,18 +666,21 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
   }
 
   // move
-  for (int i = 0; i < arrlenu(move_poses); ++i) {
-    Vector2i pos = move_poses[i];
+  for (int i = 0; i < arrlenu(mr.movements); ++i) {
+    Vector2i pos = mr.movements[i];
+    if (v2i_eq(pos, piece->pos)) continue;
     if (v2i_eq(pos, to)) {
       piece->to = to;
       piece->moving = true;
       moved = true;
-      Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
-	  .type = UNDO_CMD_TYPE_MOVE,
-	  .piece_pos = piece->pos,
-	  .moving_piece = piece,
-	  .was_first_move = !piece->moved_once,
-	});
+      if (record_undo) {
+	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	    .type = UNDO_CMD_TYPE_MOVE,
+	    .piece_pos = piece->pos,
+	    .moving_piece = piece,
+	    .was_first_move = !piece->moved_once,
+	  });
+      }
       break;
     }
   }
@@ -616,6 +690,25 @@ bool move_piece_to(Piece** piece_ptr, Vector2i to) {
   }
 
   return moved;
+}
+
+// NOTE: forward declaration...
+bool is_piece_in_danger(Piece* piece);
+static void filter_moves_that_will_not_protect_king(Piece* piece, Movement_result* mr) {
+  size_t movements_count = arrlenu(mr->movements);
+  for (int i = (int)(movements_count-1); i >= 0; --i) {
+    Vector2i move = mr->movements[i];
+    Vector2i prev_pos = piece->pos;
+    ASSERT(move_piece_to(&piece, move, *mr, false));
+
+    if (is_piece_in_danger(white_king)) {
+      arrdel(mr->movements, i);
+      movements_count = arrlenu(mr->movements);
+    }
+
+    piece->moving = false;
+    piece->to = prev_pos;
+  }
 }
 
 bool spawn_piece(Context* ctx, const Piece_type type, Vector2i pos, bool black) {
@@ -666,7 +759,8 @@ bool is_piece_in_danger(Piece* piece) {
 
     black_checking_piece = NULL;
     for (int i = 0; i < arrlen(black_piece_ptrs); ++i) {
-      Movement_result mr = get_piece_movement_positions(black_piece_ptrs[i]);
+      if (is_piece_pseudo_removed(black_piece_ptrs[i])) continue;
+      Movement_result mr = get_piece_moves(black_piece_ptrs[i]);
 
       for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
 	if (mr.eatable_piece_ptrs[j] == piece) {
@@ -687,7 +781,8 @@ bool is_piece_in_danger(Piece* piece) {
 
     white_checking_piece = NULL;
     for (int i = 0; i < arrlen(white_piece_ptrs); ++i) {
-      Movement_result mr = get_piece_movement_positions(white_piece_ptrs[i]);
+      if (is_piece_pseudo_removed(white_piece_ptrs[i])) continue;
+      Movement_result mr = get_piece_moves(white_piece_ptrs[i]);
 
       for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
 	if (mr.eatable_piece_ptrs[j] == piece) {
@@ -710,7 +805,7 @@ bool is_piece_in_danger(Piece* piece) {
   /* for (int i = 0; i < arrlenu(pieces); ++i) { */
   /*   if (pieces[i].black == piece->black) continue; */
 
-  /*   Movement_result mr = get_piece_movement_positions(&pieces[i]); */
+  /*   Movement_result mr = get_piece_moves(&pieces[i]); */
 
   /*   for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) { */
   /*     if (mr.eatable_piece_ptrs[j] == piece) { */
@@ -731,7 +826,7 @@ bool is_piece_in_danger(Piece* piece) {
 }
 
 /* bool move_is_check(Piece* piece, Piece** checked_piece) { */
-/*   Movement_result mr = get_piece_movement_positions(piece); */
+/*   Movement_result mr = get_piece_moves(piece); */
 
 /*   for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) { */
 /*     Piece* eating_piece = mr.eatable_piece_ptrs[i]; */
@@ -820,11 +915,11 @@ void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
     if ((rand() % 100) <= 50) {
       int random_idx = get_random_idx(movements_count);
       Vector2i random_move = mr.movements[random_idx];
-      move_piece_to(&selecting_piece, random_move);
+      move_piece_to(&selecting_piece, random_move, mr, true);
     } else {
       int random_idx = get_random_idx(eatable_piece_ptrs_count);
       Vector2i random_move = mr.eatable_piece_ptrs[random_idx]->pos;
-      move_piece_to(&selecting_piece, random_move);
+      move_piece_to(&selecting_piece, random_move, mr, true);
     }
     return;
   }
@@ -832,14 +927,14 @@ void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
   if (movements_count > 0) {
     int random_idx = get_random_idx(movements_count);
     Vector2i random_move = mr.movements[random_idx];
-    move_piece_to(&selecting_piece, random_move);
+    move_piece_to(&selecting_piece, random_move, mr, true);
     return;
   }
 
   if (eatable_piece_ptrs_count > 0) {
     int random_idx = get_random_idx(eatable_piece_ptrs_count);
     Vector2i random_move = mr.eatable_piece_ptrs[random_idx]->pos;
-    move_piece_to(&selecting_piece, random_move);
+    move_piece_to(&selecting_piece, random_move, mr, true);
     return;
   }
 
@@ -849,9 +944,10 @@ void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
 /* // TODO: Optimize */
 
 // ## Ways to get out of Check
-// -> king can move out of danger
-// -> other piece can protect king
+// In order of precedence
 // -> any piece can eat the checking piece
+// -> other piece can protect king
+// -> king can move out of danger
 
 inline bool tried_idx(int* tried_indices, int idx) {
   for (int i = 0; i < arrlenu(tried_indices); ++i) {
@@ -864,7 +960,7 @@ inline bool tried_idx(int* tried_indices, int idx) {
 
 static bool ai_checked_king_move_out_of_danger(void) {
   ASSERT(black_king);
-  Movement_result mr = get_piece_movement_positions(black_king);
+  Movement_result mr = get_piece_moves(black_king);
 
   if (arrlenu(mr.movements) == 0) {
     free_movement_results(mr);
@@ -885,12 +981,15 @@ static bool ai_checked_king_move_out_of_danger(void) {
     }
 
     Vector2i prev_pos = black_king->moving ? black_king->to : black_king->pos;
-    move_piece_to(&black_king, mr.movements[random_idx]);
+    move_piece_to(&black_king, mr.movements[random_idx], mr, true);
 
     if (is_piece_in_danger(black_king)) {
+      Undo_cmd_stack_pop(&undo_cmd_stack, NULL);
       black_king->to = prev_pos;
       arrput(tried_indices, random_idx);
       goto checked_king_move_out_of_danger_retry;
+    } else {
+      // TODO: Maybe push the undo here?...
     }
 
     arrfree(tried_indices);
@@ -902,8 +1001,8 @@ static bool ai_checked_king_move_out_of_danger(void) {
 }
 
 inline bool does_piece_movements_collide(Piece* a, Piece* b, Vector2i* colliding_pos) {
-    Movement_result a_mr = get_piece_movement_positions(a);
-    Movement_result b_mr = get_piece_movement_positions(b);
+    Movement_result a_mr = get_piece_moves(a);
+    Movement_result b_mr = get_piece_moves(b);
 
     bool res = false;
 
@@ -947,13 +1046,13 @@ static bool ai_protect_checked_king(void) {
 	p->moving = false;
       } else {
 	protected = true;
+	// NOTE: Doesn't leak
 	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
 	  .type = UNDO_CMD_TYPE_MOVE,
 	  .piece_pos = p->pos,
 	  .moving_piece = p,
 	  .was_first_move = !p->moved_once
 	});
-
 	break;
       }
     }
@@ -974,7 +1073,7 @@ static bool ai_eat_checking_piece(void) {
 
   for (int i = 0; i < piece_ptrs_count; ++i) {
     Piece* p = piece_ptrs[i];
-    Movement_result mr = get_piece_movement_positions(p);
+    Movement_result mr = get_piece_moves(p);
 
     size_t eatable_piece_ptrs_count = arrlenu(mr.eatable_piece_ptrs);
     for (int j = 0; j < eatable_piece_ptrs_count; ++j) {
@@ -982,6 +1081,7 @@ static bool ai_eat_checking_piece(void) {
 	eating_piece = p;
 	p->to = white_checking_piece->pos;
 	p->moving = true;
+	// NOTE: Doesn't leak
 	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
 	    .type = UNDO_CMD_TYPE_MOVE,
 	    .piece_pos = p->pos,
@@ -1032,6 +1132,8 @@ void ai_control_piece(Context* ctx) {
       return;
     }
 
+    black_checkmate = true;
+
     return;
   }
 
@@ -1044,7 +1146,7 @@ void ai_control_piece(Context* ctx) {
 
     free_movement_results(mr);
 
-    mr = get_piece_movement_positions(selected_piece);
+    mr = get_piece_moves(selected_piece);
   }
   if (!selected_piece->black) {
     goto ai_rechoose_move;
@@ -1073,15 +1175,106 @@ void ai_control_piece(Context* ctx) {
   }
 }
 
+// NOTE: mr should not be freed in this function!!!
+bool will_move_protect_king(Piece* piece, int movement_idx, int eatable_piece_idx, Movement_result mr) {
+  ASSERT(!piece->black);
+  /* ASSERT(white_check); */
+  bool will_protect = false;
+  if (movement_idx >= 0) {
+    size_t movements_count = arrlenu(mr.movements);
+#ifdef LOG_DEBUG_INFO
+    log_info("[%s] Piece: %p, movements_count: %u", __func__, piece, movements_count);
+#endif
+    ASSERT(eatable_piece_idx < 0);
+    if (movement_idx >= movements_count) {
+      DebugBreak();
+    }
+
+    Vector2i prev_pos = piece->moving ? piece->to : piece->pos;
+    move_piece_to(&piece, mr.movements[movement_idx], mr, false);
+
+    will_protect = !is_piece_in_danger(white_king);
+    piece->to = prev_pos;
+  } else if (eatable_piece_idx >= 0) {
+    size_t eatable_pieces_count = arrlenu(mr.eatable_piece_ptrs);
+    ASSERT(movement_idx < 0);
+    ASSERT(eatable_piece_idx < eatable_pieces_count);
+
+    pseudo_remove_piece(mr.eatable_piece_ptrs[eatable_piece_idx]);
+    Vector2i prev_pos = piece->moving ? piece->to : piece->pos;
+    move_piece_to(&piece, mr.movements[movement_idx], mr, false);
+
+    will_protect = !is_piece_in_danger(white_king);
+    piece->to = prev_pos;
+
+    pseudo_unremove_piece(mr.eatable_piece_ptrs[eatable_piece_idx]);
+  }
+  return will_protect;
+}
+
+bool can_piece_protect_king(Piece* piece) {
+  bool can_protect = false;
+  Movement_result mr = get_piece_moves(piece);
+  size_t movements_count = arrlenu(mr.movements);
+#ifdef LOG_DEBUG_INFO
+  log_info("[%s] Piece: %p, movements_count: %u", __func__, piece, movements_count);
+#endif
+  for (int i = 0; i < movements_count; ++i) {
+    if (will_move_protect_king(piece, i, -1, mr)) {
+      can_protect = true;
+      break;
+    }
+  }
+  if (!can_protect) {
+    size_t eatable_pieces_count = arrlenu(mr.eatable_piece_ptrs);
+    for (int i = 0; i < eatable_pieces_count; ++i) {
+      if (will_move_protect_king(piece, -1, i, mr)) {
+	can_protect = true;
+	break;
+      }
+    }
+  }
+
+  free_movement_results(mr);
+  return can_protect;
+}
+
 void user_control_piece(Context* ctx, bool can_control_black) {
   if (clock_mouse_pressed(ctx, MOUSE_BUTTON_LEFT)) {
     if (selected_piece) {
-      if (move_piece_to(&selected_piece, fix_to_tile_space(ctx->mpos))) {
+#ifdef LOG_DEBUG_INFO
+      if (!selected_piece->black) {
+	int movement_idx = -1, eating_piece_idx = -1;
+	if (get_move_idx(selected_piece, fix_to_tile_space(ctx->mpos), &movement_idx, &eating_piece_idx)) {
+	  if (movement_idx >= 0) log_info("movement_idx: %d", movement_idx);
+	  if (eating_piece_idx >= 0) log_info("eating_piece_idx: %d", eating_piece_idx);
+
+	  if (will_move_protect_king(selected_piece, movement_idx, eating_piece_idx)) {
+	    log_info("Move will protect king!");
+	  } else {
+	    log_info("Move will not protect king!");
+	  }
+	}
+      }
+#endif
+      Movement_result mr = get_piece_moves(selected_piece);
+      if (white_check) {
+	filter_moves_that_will_not_protect_king(selected_piece, &mr);
+      }
+      if (move_piece_to(&selected_piece, fix_to_tile_space(ctx->mpos), mr, true)) {
 	select_piece(NULL);
 	change_turn();
       }
+      free_movement_results(mr);
     } else {
       select_piece(get_piece_at_pos(fix_to_tile_space(ctx->mpos)));
+      if (white_check &&
+	  selected_piece &&
+	  !selected_piece->black &&
+	  !can_piece_protect_king(selected_piece)) {
+	select_piece(NULL);
+      }
+
       if (!can_control_black) {
 	if (selected_piece && selected_piece->black) select_piece(NULL);
       }
@@ -1180,7 +1373,10 @@ static void draw_board(Context* ctx, Font* font, Sprite* selected_tile_spr, Spri
     /*   SELECTED_PIECE_COLOR, */
     /* 	color_alpha(SELECTED_PIECE_COLOR, 0.5f)); */
 
-    Movement_result mr =  get_piece_movement_positions(selected_piece);
+    Movement_result mr = get_piece_moves(selected_piece);
+    if (white_check) {
+      filter_moves_that_will_not_protect_king(selected_piece, &mr);
+    }
     Vector2i* move_poses = mr.movements;
 
     draw_hover_piece = false;
@@ -1191,7 +1387,7 @@ static void draw_board(Context* ctx, Font* font, Sprite* selected_tile_spr, Spri
 	draw_hover_piece = true;
 	Sprite_set_hframe(hovering_piece_sprite, selected_piece->spr.hframe);
 	Vector2i p = fix_to_tile_space(clock_mpos_world(ctx));
-	hovering_piece_sprite->pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};;
+	hovering_piece_sprite->pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};
       }
     }
 
@@ -1201,7 +1397,7 @@ static void draw_board(Context* ctx, Font* font, Sprite* selected_tile_spr, Spri
 	draw_hover_piece = true;
 	Sprite_set_hframe(hovering_piece_sprite, selected_piece->spr.hframe);
 	Vector2i p = fix_to_tile_space(clock_mpos_world(ctx));
-	hovering_piece_sprite->pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};;
+	hovering_piece_sprite->pos = (Vector2f) {(float)p.x + tile_size/2.f, (float)p.y + tile_size/2.f};
       }
     }
 
@@ -1385,6 +1581,9 @@ int WinMain(HINSTANCE instance,
 
       cstr black_check_str = Arena_alloc_str(str_arena, "black check: %s", (black_check ? "true" : "false"));
       UI_text(&ui, black_check_str, 24, COLOR_WHITE);
+
+      cstr black_checkmate_str = Arena_alloc_str(str_arena, "black checkmate: %s", (black_checkmate ? "true" : "false"));
+      UI_text(&ui, black_checkmate_str, 24, COLOR_WHITE);
 
       cstr white_check_str = Arena_alloc_str(str_arena, "white check: %s", (white_check ? "true" : "false"));
       UI_text(&ui, white_check_str, 24, COLOR_WHITE);
