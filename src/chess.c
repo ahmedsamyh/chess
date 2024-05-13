@@ -1453,13 +1453,6 @@ static void draw_board(Context* ctx, Font* font, Sprite* selected_tile_spr, Spri
 	},
 	BLACK_KING_COLOR,
 	color_alpha(BLACK_KING_COLOR, 0.3f));
-
-      Vector2f text_pos = v2i_to_v2f(v2i_add(pos, (Vector2i) {tile_size, tile_size}));
-
-      draw_text(ctx, font, "Black King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
-      draw_text(ctx, font, "Black King", text_pos, 18, COLOR_WHITE);
-
-      draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
     }
 
     if (white_king) {
@@ -1470,17 +1463,115 @@ static void draw_board(Context* ctx, Font* font, Sprite* selected_tile_spr, Spri
 	},
 	WHITE_KING_COLOR,
 	color_alpha(WHITE_KING_COLOR, 0.3f));
-      Vector2f text_pos = v2i_to_v2f(v2i_sub(pos, (Vector2i) {tile_size, tile_size}));
-
-      draw_text(ctx, font, "White King", v2f_subs(text_pos, 2.f), 18, COLOR_BLACK);
-      draw_text(ctx, font, "White King", text_pos, 18, COLOR_WHITE);
-
-      draw_imm_line(ctx, text_pos, v2i_to_v2f(pos), COLOR_WHITE, COLOR_WHITE);
-
     }
   }
 
   clock_use_camera_view(ctx, false);
+}
+
+typedef enum {
+  STATE_MAINMENU,
+  STATE_OPTIONS,
+  STATE_PLAY,
+  STATE_COUNT,
+} State;
+
+static State state = STATE_PLAY;
+
+cstr state_as_str(State s) {
+  switch (s) {
+  case STATE_MAINMENU: return "Mainmenu";
+  case STATE_OPTIONS: return "Options";
+  case STATE_PLAY: return "Play";
+  default: ASSERT(0 && "Unreachable!");
+  }
+  return "THIS SHOULDN'T BE VISIBLE!!!";
+}
+
+static float a = 0.f;
+
+static void draw_mainmenu_bg(Context* ctx) {
+  // draw checker pattern
+  for (int y = 0; y < rows; ++y) {
+    for (int x = 0; x < cols; ++x) {
+      Color col = color_from_hex(0XFFF0F6F0);
+      if (y % 2 != x % 2) col = color_from_hex(0xFF232322);
+      draw_rect(ctx, (Rect) {
+	  .pos = (Vector2f) {(float)x*tile_size, (float)y*tile_size},
+	  .size = (Vector2f) {(float)tile_size, (float)tile_size}},
+	col);
+    }
+  }
+
+  // draw checker pattern
+  set_blend_mode(BLENDMODE_SUB);
+  for (int y = 0; y < rows; ++y) {
+    for (int x = 0; x < cols; ++x) {
+      Color color = color_from_hex(0XFFF0F6F0);
+      /* if (y % 2 != x % 2) color = color_from_hex(0xFF232322); */
+      /* color = color_alpha(color, 0.4f); */
+      draw_rect(ctx, (Rect) {
+	  .pos = (Vector2f) {(float)x*tile_size + sinf(a+y)*tile_size*0.5f, (float)y*tile_size + cosf(a+x)*tile_size*0.5f},
+	  .size = (Vector2f) {(float)tile_size, (float)tile_size}},
+	color);
+    }
+  }
+  a += ctx->delta;
+  set_blend_mode(BLENDMODE_NORMAL);
+
+  float t = map(sinf(a), -1.f, 1.f, 0.f, 0.75f);
+
+  draw_rect(ctx, (Rect) {
+      .pos =  (Vector2f) {0.f, 0.f},
+      .size = (Vector2f) {(float)ctx->win->width, (float)ctx->win->height},
+    },
+    color_alpha(COLOR_BLACK, t));
+}
+
+typedef enum Mainmenu_item {
+  MAINMENU_ITEM_PLAY,
+  MAINMENU_ITEM_OPTIONS,
+  MAINMENU_ITEM_QUIT,
+  MAINMENU_ITEM_COUNT,
+} Mainmenu_item;
+static Mainmenu_item selected_mmi = MAINMENU_ITEM_PLAY;
+
+cstr mainmenu_item_as_str(Mainmenu_item mmi) {
+  switch (mmi) {
+  case MAINMENU_ITEM_PLAY:	{ return "Play"; }
+  case MAINMENU_ITEM_OPTIONS:	{ return "Options"; }
+  case MAINMENU_ITEM_QUIT:	{ return "Quit"; }
+  default: ASSERT(0 && "Unreachable!");
+  }
+  return "CURSED!";
+}
+
+#define MAINMENU_ITEM_STR_COUNT (8 + 4)
+char mainmenu_item_str[MAINMENU_ITEM_STR_COUNT] = {0};
+
+static void draw_mainmenu(Context* ctx) {
+  draw_mainmenu_bg(ctx);
+
+  float start = (float)ctx->win->height * 0.5f;
+  float padding = 0.f;
+  int char_size = 72;
+  for (int i = 0; i < (int)MAINMENU_ITEM_COUNT; ++i) {
+    cstr text = mainmenu_item_as_str((Mainmenu_item)i);
+    snprintf(mainmenu_item_str, MAINMENU_ITEM_STR_COUNT, "%s%s%s", (i == (int)selected_mmi ? ">>" : ""), text, (i == (int)selected_mmi ? "<<" : ""));
+    Vector2f pos = {10.f, start + ((float)char_size * (float)i) + (padding * (float)i)};
+    draw_text(ctx, &ctx->default_font, mainmenu_item_str, pos, char_size, COLOR_WHITE);
+  }
+}
+
+static void update_mainmenu(Context* ctx) {
+  if (clock_key_pressed(ctx, KEY_DOWN)) {
+    selected_mmi = (selected_mmi + 1) % MAINMENU_ITEM_COUNT;
+  }
+
+  if (clock_key_pressed(ctx, KEY_UP)) {
+    selected_mmi--;
+    if (selected_mmi < 0) selected_mmi = (int)(MAINMENU_ITEM_COUNT-1);
+  }
 }
 
 #ifdef DEBUG
@@ -1517,7 +1608,7 @@ int WinMain(HINSTANCE instance,
 
 #ifdef DEBUG
 
-  UI ui = UI_make(ctx, &font, (Vector2f) {0.f, 0.f}, "Debug");
+  UI ui = UI_make(ctx, &font, (Vector2f) {50.f, 10.f}, "Debug");
 #endif
   Sprite hovering_piece_sprite = {0};
   if (!Sprite_init(&hovering_piece_sprite, Resman_load_texture_from_file(ctx->resman, "resources/gfx/piece_sheet.png"), PIECE_TYPE_COUNT*2, 1)) return 1;
@@ -1551,7 +1642,17 @@ int WinMain(HINSTANCE instance,
     // Draw
     //
 
-    draw_board(ctx, &font, &selected_tile_spr, &hovering_piece_sprite);
+    switch (state) {
+    case STATE_MAINMENU: {
+      draw_mainmenu(ctx);
+    } break;
+    case STATE_OPTIONS: {
+    } break;
+    case STATE_PLAY: {
+      draw_board(ctx, &font, &selected_tile_spr, &hovering_piece_sprite);
+    } break;
+    default: ASSERT(0 && "Unreachable!");
+    }
 
 #endif
     //
@@ -1562,6 +1663,9 @@ int WinMain(HINSTANCE instance,
     if (dev_mode) {
       UI_begin(&ui, UI_LAYOUT_KIND_VERT);
       Arena_reset(&str_arena);
+
+      cstr state_str = Arena_alloc_str(str_arena, "State: %s", state_as_str(state));
+      UI_text(&ui, state_str, 24, COLOR_GOLD);
 
       /* cstr checked_king_str = Arena_alloc_str(str_arena, "Checked king: %p", checked_king); */
       /* UI_text(&ui, checked_king_str, 24, COLOR_WHITE); */
@@ -1607,104 +1711,121 @@ int WinMain(HINSTANCE instance,
     //
     // Update
     //
+
+    if (clock_key_pressed(ctx, KEY_TAB)) {
+      state = (state + 1) % STATE_COUNT;
+    }
+
+    switch (state) {
+    case STATE_MAINMENU: {
+      update_mainmenu(ctx);
+    } break;
+    case STATE_OPTIONS: {
+    } break;
+    case STATE_PLAY: {
 #ifdef DEBUG
-    // change turn
-    if (clock_key_pressed(ctx, KEY_SPACE)) {
-      change_turn();
-    }
-
-    // TEMP: camera testing
-    const float S = 100.f;
-    if (clock_key_held(ctx, KEY_LEFT)) {
-      ctx->camera.x -= S * ctx->delta;
-    }
-    if (clock_key_held(ctx, KEY_RIGHT)) {
-      ctx->camera.x += S * ctx->delta;
-    }
-    if (clock_key_held(ctx, KEY_UP)) {
-      ctx->camera.y -= S * ctx->delta;
-    }
-    if (clock_key_held(ctx, KEY_DOWN)) {
-      ctx->camera.y += S * ctx->delta;
-    }
-
-    // dev_mode
-    if (clock_key_pressed(ctx, KEY_F1)) {
-      dev_mode = !dev_mode;
-      white_turn = true;
-    }
-
-    if (clock_key_pressed(ctx, KEY_F2)) {
-      user_control_all_pieces = !user_control_all_pieces;
-      white_turn = true;
-    }
-
-    if (clock_key_pressed(ctx, KEY_F3)) {
-      ai_control_pieces = !ai_control_pieces;
-      white_turn = true;
-    }
-#endif
-
-    // reset
-    if (clock_key_held(ctx, KEY_LEFT_CONTROL)) {
-      if (clock_key_pressed(ctx, KEY_R)) {
-	init_pieces(ctx);
+      // change turn
+      if (clock_key_pressed(ctx, KEY_SPACE)) {
+	change_turn();
       }
 
-      // undo
-      if (clock_key_pressed(ctx, KEY_Z)) {
-	Undo_cmd undo_cmd = {0};
-	if (Undo_cmd_stack_pop(&undo_cmd_stack, &undo_cmd)) {
-	  switch (undo_cmd.type) {
-	  case UNDO_CMD_TYPE_MOVE: {
-	    undo_cmd.moving_piece->moving = true;
-	    undo_cmd.moving_piece->to = undo_cmd.piece_pos;
-	    if (undo_cmd.was_first_move) {
-	      undo_cmd.moving_piece->moved_once = false;
+      // TEMP: camera testing
+      const float S = 100.f;
+      if (clock_key_held(ctx, KEY_LEFT)) {
+	ctx->camera.x -= S * ctx->delta;
+      }
+      if (clock_key_held(ctx, KEY_RIGHT)) {
+	ctx->camera.x += S * ctx->delta;
+      }
+      if (clock_key_held(ctx, KEY_UP)) {
+	ctx->camera.y -= S * ctx->delta;
+      }
+      if (clock_key_held(ctx, KEY_DOWN)) {
+	ctx->camera.y += S * ctx->delta;
+      }
+
+      // dev_mode
+      if (clock_key_pressed(ctx, KEY_F1)) {
+	dev_mode = !dev_mode;
+	white_turn = true;
+      }
+
+      if (clock_key_pressed(ctx, KEY_F2)) {
+	user_control_all_pieces = !user_control_all_pieces;
+	white_turn = true;
+      }
+
+      if (clock_key_pressed(ctx, KEY_F3)) {
+	ai_control_pieces = !ai_control_pieces;
+	white_turn = true;
+      }
+#endif
+
+      // reset
+      if (clock_key_held(ctx, KEY_LEFT_CONTROL)) {
+	if (clock_key_pressed(ctx, KEY_R)) {
+	  init_pieces(ctx);
+	}
+
+	// undo
+	if (clock_key_pressed(ctx, KEY_Z)) {
+	  Undo_cmd undo_cmd = {0};
+	  if (Undo_cmd_stack_pop(&undo_cmd_stack, &undo_cmd)) {
+	    switch (undo_cmd.type) {
+	    case UNDO_CMD_TYPE_MOVE: {
+	      undo_cmd.moving_piece->moving = true;
+	      undo_cmd.moving_piece->to = undo_cmd.piece_pos;
+	      if (undo_cmd.was_first_move) {
+		undo_cmd.moving_piece->moved_once = false;
+	      }
+	    } break;
+	    case UNDO_CMD_TYPE_SPAWN: {
+	      if (!spawn_piece(ctx, undo_cmd.piece_type, undo_cmd.piece_pos, undo_cmd.piece_black)) {
+		// TODO: quit
+		return;
+	      }
+	      correct_undo_move(&pieces[arrlenu(pieces)-1]);
+	    } break;
+	    case UNDO_CMD_TYPE_REMOVE: {
+	    } break;
+	    default: ASSERT(0 && "Unreachable!");
 	    }
-	  } break;
-	  case UNDO_CMD_TYPE_SPAWN: {
-	    if (!spawn_piece(ctx, undo_cmd.piece_type, undo_cmd.piece_pos, undo_cmd.piece_black)) {
-	      // TODO: quit
-	      return;
-	    }
-	    correct_undo_move(&pieces[arrlenu(pieces)-1]);
-	  } break;
-	  case UNDO_CMD_TYPE_REMOVE: {
-	  } break;
-	  default: ASSERT(0 && "Unreachable!");
 	  }
 	}
       }
-    }
 
-    // move piece
-    if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
-      if (white_turn) {
-	user_control_piece(ctx, user_control_all_pieces);
-      } else {
-	ai_control_piece(ctx);
-      }
-    }
-
-#ifdef DEBUG
-    if (dev_mode) {
-      // remove piece
-      if (clock_mouse_pressed(ctx, MOUSE_BUTTON_MIDDLE)) {
-	select_piece(NULL);
-	Piece* clicked_piece = get_piece_at_pos(fix_to_tile_space(ctx->mpos));
-	if (clicked_piece) {
-	  remove_piece(clicked_piece);
+      // move piece
+      if (!animate_piece_moving(((int)ctx->delta) <= 0 ? 1 : (int)ctx->delta)) {
+	if (white_turn) {
+	  user_control_piece(ctx, user_control_all_pieces);
+	} else {
+	  ai_control_piece(ctx);
 	}
       }
-    }
+
+#ifdef DEBUG
+      if (dev_mode) {
+	// remove piece
+	if (clock_mouse_pressed(ctx, MOUSE_BUTTON_MIDDLE)) {
+	  select_piece(NULL);
+	  Piece* clicked_piece = get_piece_at_pos(fix_to_tile_space(ctx->mpos));
+	  if (clicked_piece) {
+	    remove_piece(clicked_piece);
+	  }
+	}
+      }
 #endif
 
-    white_check = is_piece_in_danger(white_king);
+      white_check = is_piece_in_danger(white_king);
 
-    black_check = is_piece_in_danger(black_king);
+      black_check = is_piece_in_danger(black_king);
 
-    remove_pieces_marked_for_removal();
+      remove_pieces_marked_for_removal();
+
+    } break;
+    default: ASSERT(0 && "Unreachable!");
+    }
+
 
     clock_end_draw(ctx);
   }
