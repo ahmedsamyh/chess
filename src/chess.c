@@ -4,8 +4,6 @@
 // TODO: Prevent ai from making moves that will leave the king in check
 // TODO: Implement Checkmate for user // ai done
 // TODO: Implement Transformation of Pawn to any piece except Pawn and King when they are at the base of the opponent
-// NOTE: Check is when king is in eatable but can king can move to safety or another piece can shield the king.
-// NOTE: Checkmate is when king is in eatable and not the above
 
 typedef struct Piece Piece;
 typedef enum Piece_type Piece_type;
@@ -222,8 +220,15 @@ static void correct_undo_move(Piece* spawned_piece) {
       return;
     }
   }
-  ASSERT(0 && "Unreachable!");
 }
+
+typedef enum Piece_flag {
+  PIECE_FLAG_BLACK,
+  PIECE_FLAG_MOVED_ONCE,
+  PIECE_FLAG_MOVING,
+  PIECE_FLAG_CASTLED,
+  PIECE_FLAG_COUNT,
+} Piece_flag;
 
 struct Piece {
   Piece_type type;
@@ -232,9 +237,10 @@ struct Piece {
   int height;
   Sprite spr;
   Context* ctx;
-  bool black;
-  bool moved_once;
-  bool moving;
+  /* bool black; */
+  /* bool moved_once; */
+  /* bool moving; */
+  uint32 flags;
 };
 
 inline void select_piece(Piece* piece) {
@@ -246,8 +252,9 @@ inline void select_piece(Piece* piece) {
 inline Piece** get_black_piece_ptrs(void) {
   Piece** black_piece_ptrs = NULL;
 
-  for (int i = 0; i < arrlenu(pieces); ++i) {
-    if (pieces[i].black) {
+  size_t pieces_count = arrlenu(pieces);
+  for (int i = 0; i < pieces_count; ++i) {
+    if (pieces[i].flags & (1<<PIECE_FLAG_BLACK)) {
       arrput(black_piece_ptrs, &pieces[i]);
     }
   }
@@ -259,7 +266,7 @@ inline Piece** get_white_piece_ptrs(void) {
   Piece** white_piece_ptrs = NULL;
 
   for (int i = 0; i < arrlenu(pieces); ++i) {
-    if (!pieces[i].black) {
+    if (!(pieces[i].flags & (1<<PIECE_FLAG_BLACK))) {
       arrput(white_piece_ptrs, &pieces[i]);
     }
   }
@@ -275,7 +282,7 @@ static void reverse_offsets_y(Vector2i* offsets) {
 
 Piece* get_piece_at_pos(Vector2i pos) {
   for (int i = 0; i < arrlenu(pieces); ++i) {
-    Vector2i p = pieces[i].moving ? pieces[i].to : pieces[i].pos;
+    Vector2i p = (pieces[i].flags & (1<<PIECE_FLAG_MOVING)) ? pieces[i].to : pieces[i].pos;
     if (v2i_eq(pos, p)) {
       return &pieces[i];
     }
@@ -287,7 +294,7 @@ Piece* get_piece_at_pos(Vector2i pos) {
 #define EAT_PIECE() \
   Piece* existing_piece = get_piece_at_pos(v2i_add(piece->pos, v2i_muls(offset, tile_size))); \
   if (existing_piece &&							\
-      existing_piece->black != piece->black) {				\
+      (existing_piece->flags & (1<<PIECE_FLAG_BLACK)) != (piece->flags & (1<<PIECE_FLAG_BLACK))) { \
     arrput(res.eatable_piece_ptrs, existing_piece);			\
   }
 
@@ -329,8 +336,8 @@ Movement_result get_piece_moves(Piece* piece) {
   Vector2i* offsets = NULL; // dynamic-array
   switch (piece->type) {
   case PIECE_TYPE_PAWN: {
-    for (int i = 1; i <= (piece->moved_once ? 1 : 2); ++i) {
-      Vector2i offset = {0, piece->black ? i : -i};
+    for (int i = 1; i <= ((piece->flags & (1<<PIECE_FLAG_MOVED_ONCE)) ? 1 : 2); ++i) {
+      Vector2i offset = {0, (piece->flags & (1<<PIECE_FLAG_BLACK)) ? i : -i};
       BREAK_IF_PIECE_EXISTS();
       arrput(offsets, offset);
     }
@@ -394,7 +401,7 @@ Movement_result get_piece_moves(Piece* piece) {
     if (is_pos_in_bounds_in_screen_space(pos)) {
       Piece* existing_piece = get_piece_at_pos(pos);
       if (existing_piece) {
-	if (existing_piece->black != piece->black)
+	if ((existing_piece->flags & (1<<PIECE_FLAG_BLACK)) != (piece->flags & (1<<PIECE_FLAG_BLACK)))
 	  arrput(res.eatable_piece_ptrs, existing_piece);
       } else {
 	arrput(res.movements, pos);
@@ -405,11 +412,11 @@ Movement_result get_piece_moves(Piece* piece) {
   // pawn can eat diagonally
   if (piece->type == PIECE_TYPE_PAWN) {
     for (int i = 0; i < 2; ++i) {
-      Vector2i offset = {i == 0 ? -1 : 1, piece->black ? 1 : -1};
+      Vector2i offset = {i == 0 ? -1 : 1, (piece->flags & (1<<PIECE_FLAG_BLACK)) ? 1 : -1};
       Vector2i pos = v2i_add(piece->pos, v2i_muls(offset, tile_size));
       Piece* existing_piece = get_piece_at_pos(pos);
       if (existing_piece &&
-	  existing_piece->black != piece->black) {
+	  (existing_piece->flags & (1<<PIECE_FLAG_BLACK)) != (piece->flags & PIECE_FLAG_BLACK)) {
 	// eatable enemy
 	arrput(res.eatable_piece_ptrs, existing_piece);
       }
@@ -433,7 +440,7 @@ bool change_piece_type(Piece* piece, const Piece_type type) {
 
   piece->spr.scale = scale;
 
-#define X(idx) ((idx)*2 + (piece->black ? 1 : 0))
+#define X(idx) ((idx)*2 + ((piece->flags & (1<<PIECE_FLAG_BLACK)) ? 1 : 0))
   switch (type) {
   case PIECE_TYPE_PAWN: {
     Sprite_set_hframe(&piece->spr, X(0));
@@ -464,7 +471,10 @@ bool change_piece_type(Piece* piece, const Piece_type type) {
 bool init_piece(Piece* piece, Context* ctx, const Piece_type type, bool black) {
   piece->ctx = ctx;
   piece->pos = (Vector2i) {0, 0};
-  piece->black = black;
+  if (black)
+    piece->flags |= (1<<PIECE_FLAG_BLACK);
+  else
+    piece->flags &= ~(1<<PIECE_FLAG_BLACK);
   if (!change_piece_type(piece, type)) {
     return false;
   }
@@ -496,14 +506,14 @@ void draw_piece(Piece* piece) {
     ASSERT((piece->type == PIECE_TYPE_KING) ||
 	   (piece->type == PIECE_TYPE_ROOK));
     piece->to = to;
-    piece->moving = true;
+    piece->flags |= (1<<PIECE_FLAG_MOVING);
     if (record_undo) {
       // NOTE: Doesn't leak
       Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
 	  .type = UNDO_CMD_TYPE_MOVE,
 	  .piece_pos = piece->pos,
 	  .moving_piece = piece,
-	  .was_first_move = !piece->moved_once,
+	  .was_first_move = !(piece->flags & (1<<PIECE_FLAG_MOVED_ONCE)),
 	});
     }
     return true;
@@ -518,7 +528,7 @@ void draw_piece(Piece* piece) {
     eated_piece = mr.eatable_piece_ptrs[i];
     if (v2i_eq(eated_piece->pos, to)) {
       piece->to = to;
-      piece->moving = true;
+      piece->flags |= (1<<PIECE_FLAG_MOVING);
       moved = true;
       remove_eated_piece = true;
       if (record_undo) {
@@ -527,7 +537,7 @@ void draw_piece(Piece* piece) {
 	    .type = UNDO_CMD_TYPE_MOVE,
 	    .piece_pos = piece->pos,
 	    .moving_piece = piece,
-	    .was_first_move = !piece->moved_once,
+	    .was_first_move = !(piece->flags & (1<<PIECE_FLAG_MOVED_ONCE)),
 	  });
       }
       break;
@@ -543,7 +553,8 @@ void draw_piece(Piece* piece) {
       .eated_piece = eated_piece
     };
 
-    ASSERT(entry.eating_piece->black != entry.eated_piece->black);
+    ASSERT((entry.eating_piece->flags & (1<<PIECE_FLAG_BLACK)) !=
+	   (entry.eated_piece->flags & (1<<PIECE_FLAG_BLACK)));
     arrput(piece_removal_entries, entry);
   }
 
@@ -553,22 +564,22 @@ void draw_piece(Piece* piece) {
     if (v2i_eq(pos, piece->pos)) continue;
     if (v2i_eq(pos, to)) {
       piece->to = to;
-      piece->moving = true;
+      piece->flags |= (1<<PIECE_FLAG_MOVING);
       moved = true;
       if (record_undo) {
 	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
 	    .type = UNDO_CMD_TYPE_MOVE,
 	    .piece_pos = piece->pos,
 	    .moving_piece = piece,
-	    .was_first_move = !piece->moved_once,
+	    .was_first_move = !(piece->flags & (1<<PIECE_FLAG_MOVED_ONCE)),
 	  });
       }
       break;
     }
   }
 
-  if (!piece->moved_once && moved) {
-    piece->moved_once = true;
+  if (!(piece->flags & (1<<PIECE_FLAG_MOVED_ONCE)) && moved) {
+    piece->flags |= (1<<PIECE_FLAG_MOVED_ONCE);
   }
 
   return moved;
@@ -588,14 +599,14 @@ bool castle(Piece* king, Piece* rook) {
   if (!king || !rook) { return false; }
   if (king->type != PIECE_TYPE_KING ||
       rook->type != PIECE_TYPE_ROOK ||
-      king->black != rook->black) {
+      (king->flags & (1<<PIECE_FLAG_BLACK)) != (rook->flags & (1<<PIECE_FLAG_BLACK))) {
     return false;
   }
 
-  if (king->moved_once) {
+  if (king->flags & (1<<PIECE_FLAG_MOVED_ONCE)) {
     log_error("King has moved once!");
     return false;
-  } else if (rook->moved_once) {
+  } else if (rook->flags & (1<<PIECE_FLAG_MOVED_ONCE)) {
     log_error("Rook has moved once!");
     return false;
   }
@@ -624,7 +635,7 @@ bool castle(Piece* king, Piece* rook) {
   ASSERT(move_piece_castling(&king, king_castled_pos, mr, true));
   if (is_piece_in_danger(king)) {
     king->to = king->pos;
-    king->moving = false;
+    king->flags &= ~(1 << PIECE_FLAG_MOVING);
     log_info("King will be checked when castled!");
     return false;
   }
@@ -645,7 +656,7 @@ bool animate_piece_moving(int delta) {
   bool moving = false;
   for (int i = 0; i < arrlenu(pieces); ++i) {
     Piece* piece = &pieces[i];
-    if (piece->moving) {
+    if (piece->flags & (1<<PIECE_FLAG_MOVING)) {
       Vector2i dir = {0, 0};
       int diff = piece->to.x - piece->pos.x;
       if (abs(diff) < abs(piece_move_speed)) {
@@ -674,7 +685,7 @@ bool animate_piece_moving(int delta) {
       piece->pos = v2i_add(piece->pos, dir);
 
       if (v2i_eq(piece->pos, piece->to)) {
-	piece->moving = false;
+	piece->flags &= ~(1<<PIECE_FLAG_MOVING);
       }
       moving = true;
     }
@@ -717,7 +728,7 @@ void remove_piece(Piece* removing_piece) {
       .type = UNDO_CMD_TYPE_SPAWN,
       .piece_pos = removing_piece->pos,
       .piece_type = removing_piece->type,
-      .piece_black = removing_piece->black,
+      .piece_black = (removing_piece->flags & (1<<PIECE_FLAG_BLACK)),
     });
 
   for (int i = 0; i < arrlenu(pieces); ++i) {
@@ -785,7 +796,7 @@ static void filter_moves_that_will_not_protect_king(Piece* piece, Movement_resul
       movements_count = arrlenu(mr->movements);
     }
 
-    piece->moving = false;
+    piece->flags &= ~(1<<PIECE_FLAG_MOVING);
     piece->to = prev_pos;
   }
 }
@@ -833,7 +844,7 @@ void reset_variables(void) {
 }
 
 bool is_piece_in_danger(Piece* piece) {
-  if (!piece->black) {
+  if (!(piece->flags & (1<<PIECE_FLAG_BLACK))) {
     Piece** black_piece_ptrs = get_black_piece_ptrs();
 
     black_checking_piece = NULL;
@@ -843,7 +854,6 @@ bool is_piece_in_danger(Piece* piece) {
 
       for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
 	if (mr.eatable_piece_ptrs[j] == piece) {
-	  ASSERT(!piece->black);
 	  black_checking_piece = black_piece_ptrs[i];
 	}
       }
@@ -865,7 +875,6 @@ bool is_piece_in_danger(Piece* piece) {
 
       for (int j = 0; j < arrlenu(mr.eatable_piece_ptrs); ++j) {
 	if (mr.eatable_piece_ptrs[j] == piece) {
-	  ASSERT(piece->black);
 	  white_checking_piece = white_piece_ptrs[i];
 	}
       }
@@ -990,15 +999,26 @@ void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
 
   int eatable_piece_ptrs_count = (int)arrlenu(mr.eatable_piece_ptrs);
 
+ ai_choose_move_retry:
   if (movements_count > 0 && eatable_piece_ptrs_count > 0) {
     if ((rand() % 100) <= 50) {
       int random_idx = get_random_idx(movements_count);
       Vector2i random_move = mr.movements[random_idx];
       move_piece_to(&selecting_piece, random_move, mr, true);
+      if (is_piece_in_danger(black_king)) {
+	selecting_piece->to = selecting_piece->pos;
+	selecting_piece->flags &= ~(1<<PIECE_FLAG_MOVING);
+	goto ai_choose_move_retry;
+      }
     } else {
       int random_idx = get_random_idx(eatable_piece_ptrs_count);
       Vector2i random_move = mr.eatable_piece_ptrs[random_idx]->pos;
       move_piece_to(&selecting_piece, random_move, mr, true);
+      if (is_piece_in_danger(black_king)) {
+	selecting_piece->to = selecting_piece->pos;
+        selecting_piece->flags &= ~(1<<PIECE_FLAG_MOVING);
+	goto ai_choose_move_retry;
+      }
     }
     return;
   }
@@ -1007,6 +1027,11 @@ void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
     int random_idx = get_random_idx(movements_count);
     Vector2i random_move = mr.movements[random_idx];
     move_piece_to(&selecting_piece, random_move, mr, true);
+    if (is_piece_in_danger(black_king)) {
+      selecting_piece->to = selecting_piece->pos;
+      selecting_piece->flags &= ~(1<<PIECE_FLAG_MOVING);
+      goto ai_choose_move_retry;
+    }
     return;
   }
 
@@ -1014,6 +1039,11 @@ void ai_choose_move(Piece* selecting_piece, Movement_result mr) {
     int random_idx = get_random_idx(eatable_piece_ptrs_count);
     Vector2i random_move = mr.eatable_piece_ptrs[random_idx]->pos;
     move_piece_to(&selecting_piece, random_move, mr, true);
+    if (is_piece_in_danger(black_king)) {
+      selecting_piece->to = selecting_piece->pos;
+      selecting_piece->flags &= ~(1<<PIECE_FLAG_MOVING);
+      goto ai_choose_move_retry;
+    }
     return;
   }
 
@@ -1059,7 +1089,7 @@ static bool ai_checked_king_move_out_of_danger(void) {
       random_idx = get_random_idx(movements_count);
     }
 
-    Vector2i prev_pos = black_king->moving ? black_king->to : black_king->pos;
+    Vector2i prev_pos = (black_king->flags & (1<<PIECE_FLAG_MOVING)) ? black_king->to : black_king->pos;
     move_piece_to(&black_king, mr.movements[random_idx], mr, true);
 
     if (is_piece_in_danger(black_king)) {
@@ -1119,10 +1149,10 @@ static bool ai_protect_checked_king(void) {
       p->to = colliding_pos;
       char* to_str = get_coord_str(p->to);
       free(to_str);
-      p->moving = true;
+      p->flags |= (1<<PIECE_FLAG_MOVING);
       if (is_piece_in_danger(black_king)) {
 	p->to = prev_pos;
-	p->moving = false;
+	p->flags &= ~(1<<PIECE_FLAG_MOVING);
       } else {
 	protected = true;
 	// NOTE: Doesn't leak
@@ -1130,7 +1160,7 @@ static bool ai_protect_checked_king(void) {
 	  .type = UNDO_CMD_TYPE_MOVE,
 	  .piece_pos = p->pos,
 	  .moving_piece = p,
-	  .was_first_move = !p->moved_once
+	  .was_first_move = !(p->flags & (1<<PIECE_FLAG_MOVED_ONCE))
 	});
 	break;
       }
@@ -1159,13 +1189,13 @@ static bool ai_eat_checking_piece(void) {
       if (mr.eatable_piece_ptrs[j] == white_checking_piece) {
 	eating_piece = p;
 	p->to = white_checking_piece->pos;
-	p->moving = true;
+	p->flags |= (1<<PIECE_FLAG_MOVING);
 	// NOTE: Doesn't leak
 	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
 	    .type = UNDO_CMD_TYPE_MOVE,
 	    .piece_pos = p->pos,
 	    .moving_piece = p,
-	    .was_first_move = !p->moved_once,
+	    .was_first_move = !(p->flags & (1<<PIECE_FLAG_MOVED_ONCE)),
 	  });
         ate_checking_piece = true;
 	free_movement_results(mr);
@@ -1227,12 +1257,12 @@ void ai_control_piece(Context* ctx) {
 
     mr = get_piece_moves(selected_piece);
   }
-  if (!selected_piece->black) {
+  if (!(selected_piece->flags & (1<<PIECE_FLAG_BLACK))) {
     goto ai_rechoose_move;
   }
 
   Vector2i moving_from = selected_piece->pos;
-  ASSERT(selected_piece->black);
+  ASSERT((selected_piece->flags & (1<<PIECE_FLAG_BLACK)));
 
   ai_choose_move(selected_piece, mr);
 
@@ -1240,7 +1270,7 @@ void ai_control_piece(Context* ctx) {
   char* moving_from_coord = get_coord_str(moving_from);
   char* moved_to_coord = get_coord_str(selected_piece->to);
 
-  log_info("Moved %s %s Piece from %s to %s", (selected_piece->black ? "Black" : "White"), get_piece_type_str(selected_piece->type),
+  log_info("Moved %s %s Piece from %s to %s", ((selected_piece->flags & (1<<PIECE_FLAG_BLACK)) ? "Black" : "White"), get_piece_type_str(selected_piece->type),
 	   moving_from_coord,
 	   moved_to_coord);
 
@@ -1256,7 +1286,7 @@ void ai_control_piece(Context* ctx) {
 
 // NOTE: mr should not be freed in this function!!!
 bool will_move_protect_king(Piece* piece, int movement_idx, int eatable_piece_idx, Movement_result mr) {
-  ASSERT(!piece->black);
+  ASSERT(!(piece->flags & (1<<PIECE_FLAG_BLACK)));
   /* ASSERT(white_check); */
   bool will_protect = false;
   if (movement_idx >= 0) {
@@ -1269,7 +1299,7 @@ bool will_move_protect_king(Piece* piece, int movement_idx, int eatable_piece_id
       DebugBreak();
     }
 
-    Vector2i prev_pos = piece->moving ? piece->to : piece->pos;
+    Vector2i prev_pos = (piece->flags & (1<<PIECE_FLAG_MOVING)) ? piece->to : piece->pos;
     move_piece_to(&piece, mr.movements[movement_idx], mr, false);
 
     will_protect = !is_piece_in_danger(white_king);
@@ -1280,7 +1310,7 @@ bool will_move_protect_king(Piece* piece, int movement_idx, int eatable_piece_id
     ASSERT(eatable_piece_idx < eatable_pieces_count);
 
     pseudo_remove_piece(mr.eatable_piece_ptrs[eatable_piece_idx]);
-    Vector2i prev_pos = piece->moving ? piece->to : piece->pos;
+    Vector2i prev_pos = (piece->flags & (1<<PIECE_FLAG_MOVING)) ? piece->to : piece->pos;
     move_piece_to(&piece, mr.movements[movement_idx], mr, false);
 
     will_protect = !is_piece_in_danger(white_king);
@@ -1358,13 +1388,13 @@ void user_control_piece(Context* ctx, bool can_control_black) {
       select_piece(get_piece_at_pos(fix_to_tile_space(ctx->mpos)));
       if (white_check &&
 	  selected_piece &&
-	  !selected_piece->black &&
+	  !(selected_piece->flags & (1<<PIECE_FLAG_BLACK)) &&
 	  !can_piece_protect_king(selected_piece)) {
 	select_piece(NULL);
       }
 
       if (!can_control_black) {
-	if (selected_piece && selected_piece->black) select_piece(NULL);
+	if (selected_piece && (selected_piece->flags & (1<<PIECE_FLAG_BLACK))) select_piece(NULL);
       }
     }
     draw_hover_piece = false;
@@ -1899,10 +1929,10 @@ int WinMain(HINSTANCE instance,
 	  if (Undo_cmd_stack_pop(&undo_cmd_stack, &undo_cmd)) {
 	    switch (undo_cmd.type) {
 	    case UNDO_CMD_TYPE_MOVE: {
-	      undo_cmd.moving_piece->moving = true;
+	      undo_cmd.moving_piece->flags |= (1<<PIECE_FLAG_MOVING);
 	      undo_cmd.moving_piece->to = undo_cmd.piece_pos;
 	      if (undo_cmd.was_first_move) {
-		undo_cmd.moving_piece->moved_once = false;
+		undo_cmd.moving_piece->flags &= ~(1<<PIECE_FLAG_MOVED_ONCE);
 	      }
 	    } break;
 	    case UNDO_CMD_TYPE_SPAWN: {
