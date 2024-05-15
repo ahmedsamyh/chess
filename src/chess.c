@@ -603,6 +603,16 @@ bool castle(Piece* king, Piece* rook) {
     return false;
   }
 
+  if (king->flags & (1<<PIECE_FLAG_CASTLED)) {
+    log_error("King already castled!");
+    return false;
+  }
+
+  if (rook->flags & (1<<PIECE_FLAG_CASTLED)) {
+    log_error("Rook already castled!");
+    return false;
+  }
+
   if (king->flags & (1<<PIECE_FLAG_MOVED_ONCE)) {
     log_error("King has moved once!");
     return false;
@@ -642,6 +652,9 @@ bool castle(Piece* king, Piece* rook) {
 
   Vector2i rook_castled_pos = fix_to_tile_space(v2i_to_v2f(v2i_add(king_castled_pos, v2i_muls(dir, -1))));
   ASSERT(move_piece_castling(&rook, rook_castled_pos, mr, true));
+
+  king->flags |= (1<<PIECE_FLAG_CASTLED);
+  rook->flags |= (1<<PIECE_FLAG_CASTLED);
 
   return true;
 }
