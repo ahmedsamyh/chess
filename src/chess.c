@@ -2,7 +2,6 @@
 #include <time.h>
 
 // TODO: Prevent ai from making moves that will leave the king in check
-// TODO: Implement Castling
 // TODO: Implement Checkmate for user // ai done
 // TODO: Implement Transformation of Pawn to any piece except Pawn and King when they are at the base of the opponent
 // NOTE: Check is when king is in eatable but can king can move to safety or another piece can shield the king.
@@ -620,7 +619,7 @@ bool castle(Piece* king, Piece* rook) {
     return false;
   }
 
-  Vector2i king_castled_pos = v2i_add(king->pos, v2i_muls(dir, tile_size*2));
+  Vector2i king_castled_pos = fix_to_tile_space(v2i_to_v2f(v2i_add(king->pos, v2i_muls(dir, 2))));
   Movement_result mr = {0}; // dummy
   ASSERT(move_piece_castling(&king, king_castled_pos, mr, true));
   if (is_piece_in_danger(king)) {
@@ -629,6 +628,9 @@ bool castle(Piece* king, Piece* rook) {
     log_info("King will be checked when castled!");
     return false;
   }
+
+  Vector2i rook_castled_pos = fix_to_tile_space(v2i_to_v2f(v2i_add(king_castled_pos, v2i_muls(dir, -1))));
+  ASSERT(move_piece_castling(&rook, rook_castled_pos, mr, true));
 
   return true;
 }
@@ -1343,6 +1345,8 @@ void user_control_piece(Context* ctx, bool can_control_black) {
       if (selected_piece->type == PIECE_TYPE_KING &&
 	  castle(selected_piece, get_piece_at_pos(fix_to_tile_space(ctx->mpos)))) {
 	log_info("Castled!");
+	select_piece(NULL);
+	change_turn();
       } else {
 	if (move_piece_to(&selected_piece, fix_to_tile_space(ctx->mpos), mr, true)) {
 	  select_piece(NULL);
@@ -1886,6 +1890,7 @@ int WinMain(HINSTANCE instance,
       if (clock_key_held(ctx, KEY_LEFT_CONTROL)) {
 	if (clock_key_pressed(ctx, KEY_R)) {
 	  init_pieces(ctx);
+	  undo_cmd_stack.count = 0;
 	}
 
 	// undo
