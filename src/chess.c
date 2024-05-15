@@ -486,6 +486,153 @@ void draw_piece(Piece* piece) {
   draw_sprite(piece->ctx, &piece->spr);
 }
 
+
+// NOTE: mr should not be freed in this function!!!
+ static bool move_piece_to_raw(Piece** piece_ptr, Vector2i to, Movement_result mr, bool record_undo, bool is_castling) {
+  Piece* piece = *piece_ptr;
+  if (v2i_eq(piece->pos, to)) return false;
+  if (!piece) return false;
+
+  if (is_castling) {
+    ASSERT((piece->type == PIECE_TYPE_KING) ||
+	   (piece->type == PIECE_TYPE_ROOK));
+    piece->to = to;
+    piece->moving = true;
+    if (record_undo) {
+      // NOTE: Doesn't leak
+      Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	  .type = UNDO_CMD_TYPE_MOVE,
+	  .piece_pos = piece->pos,
+	  .moving_piece = piece,
+	  .was_first_move = !piece->moved_once,
+	});
+    }
+    return true;
+  }
+
+  bool moved = false;
+
+  Piece* eated_piece = NULL;
+  bool remove_eated_piece = false;
+  // eat
+  for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) {
+    eated_piece = mr.eatable_piece_ptrs[i];
+    if (v2i_eq(eated_piece->pos, to)) {
+      piece->to = to;
+      piece->moving = true;
+      moved = true;
+      remove_eated_piece = true;
+      if (record_undo) {
+	// NOTE: Doesn't leak
+	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	    .type = UNDO_CMD_TYPE_MOVE,
+	    .piece_pos = piece->pos,
+	    .moving_piece = piece,
+	    .was_first_move = !piece->moved_once,
+	  });
+      }
+      break;
+    }
+  }
+
+  if (remove_eated_piece &&
+      eated_piece) {
+    ASSERT(eated_piece != piece);
+
+    Piece_removal_entry entry = {
+      .eating_piece = piece,
+      .eated_piece = eated_piece
+    };
+
+    ASSERT(entry.eating_piece->black != entry.eated_piece->black);
+    arrput(piece_removal_entries, entry);
+  }
+
+  // move
+  for (int i = 0; i < arrlenu(mr.movements); ++i) {
+    Vector2i pos = mr.movements[i];
+    if (v2i_eq(pos, piece->pos)) continue;
+    if (v2i_eq(pos, to)) {
+      piece->to = to;
+      piece->moving = true;
+      moved = true;
+      if (record_undo) {
+	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
+	    .type = UNDO_CMD_TYPE_MOVE,
+	    .piece_pos = piece->pos,
+	    .moving_piece = piece,
+	    .was_first_move = !piece->moved_once,
+	  });
+      }
+      break;
+    }
+  }
+
+  if (!piece->moved_once && moved) {
+    piece->moved_once = true;
+  }
+
+  return moved;
+}
+
+static bool move_piece_to(Piece** piece_ptr, Vector2i to, Movement_result mr, bool record_undo) {
+  return move_piece_to_raw(piece_ptr, to, mr, record_undo, false);
+}
+
+static bool move_piece_castling(Piece** piece_ptr, Vector2i to, Movement_result mr, bool record_undo) {
+  return move_piece_to_raw(piece_ptr, to, mr, record_undo, true);
+}
+
+// NOTE: forward declaration...
+bool is_piece_in_danger(Piece* piece);
+bool castle(Piece* king, Piece* rook) {
+  if (!king || !rook) { return false; }
+  if (king->type != PIECE_TYPE_KING ||
+      rook->type != PIECE_TYPE_ROOK ||
+      king->black != rook->black) {
+    return false;
+  }
+
+  if (king->moved_once) {
+    log_error("King has moved once!");
+    return false;
+  } else if (rook->moved_once) {
+    log_error("Rook has moved once!");
+    return false;
+  }
+
+  // Check if the squares between the king and the rook are vacant
+  Vector2i dir = v2i_muls(v2i_normalize(v2i_sub(rook->pos, king->pos)), tile_size);
+  ASSERT(dir.y == 0);
+
+  Vector2i p = v2i_add(king->pos, dir);
+  bool vacant = true;
+  while (!v2i_eq(p, rook->pos)) {
+    if (get_piece_at_pos(fix_to_tile_space(v2i_to_v2f(p))) != NULL) {
+      vacant = false;
+      break;
+    }
+    p = v2i_add(p, dir);
+  }
+
+  if (!vacant) {
+    log_error("There are pieces between the King and the Rook");
+    return false;
+  }
+
+  Vector2i king_castled_pos = v2i_add(king->pos, v2i_muls(dir, tile_size*2));
+  Movement_result mr = {0}; // dummy
+  ASSERT(move_piece_castling(&king, king_castled_pos, mr, true));
+  if (is_piece_in_danger(king)) {
+    king->to = king->pos;
+    king->moving = false;
+    log_info("King will be checked when castled!");
+    return false;
+  }
+
+  return true;
+}
+
 Vector2i tile_to_screen_space(Vector2i tile_space) {
   ASSERT(0 <= tile_space.x && tile_space.x < cols);
   ASSERT(0 <= tile_space.y && tile_space.y < rows);
@@ -620,77 +767,6 @@ static bool get_move_idx(Piece* piece, Vector2i to, int* movement_idx, int* eati
 
   free_movement_results(mr);
   return found;
-}
-
-// NOTE: mr should not be freed in this function!!!
-static bool move_piece_to(Piece** piece_ptr, Vector2i to, Movement_result mr, bool record_undo) {
-  Piece* piece = *piece_ptr;
-  if (v2i_eq(piece->pos, to)) return false;
-  if (!piece) return false;
-
-  bool moved = false;
-
-  Piece* eated_piece = NULL;
-  bool remove_eated_piece = false;
-  // eat
-  for (int i = 0; i < arrlenu(mr.eatable_piece_ptrs); ++i) {
-    eated_piece = mr.eatable_piece_ptrs[i];
-    if (v2i_eq(eated_piece->pos, to)) {
-      piece->to = to;
-      piece->moving = true;
-      moved = true;
-      remove_eated_piece = true;
-      if (record_undo) {
-	// NOTE: Doesn't leak
-	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
-	    .type = UNDO_CMD_TYPE_MOVE,
-	    .piece_pos = piece->pos,
-	    .moving_piece = piece,
-	    .was_first_move = !piece->moved_once,
-	  });
-      }
-      break;
-    }
-  }
-
-  if (remove_eated_piece &&
-      eated_piece) {
-    ASSERT(eated_piece != piece);
-
-    Piece_removal_entry entry = {
-      .eating_piece = piece,
-      .eated_piece = eated_piece
-    };
-
-    ASSERT(entry.eating_piece->black != entry.eated_piece->black);
-    arrput(piece_removal_entries, entry);
-  }
-
-  // move
-  for (int i = 0; i < arrlenu(mr.movements); ++i) {
-    Vector2i pos = mr.movements[i];
-    if (v2i_eq(pos, piece->pos)) continue;
-    if (v2i_eq(pos, to)) {
-      piece->to = to;
-      piece->moving = true;
-      moved = true;
-      if (record_undo) {
-	Undo_cmd_stack_push(&undo_cmd_stack, (Undo_cmd) {
-	    .type = UNDO_CMD_TYPE_MOVE,
-	    .piece_pos = piece->pos,
-	    .moving_piece = piece,
-	    .was_first_move = !piece->moved_once,
-	  });
-      }
-      break;
-    }
-  }
-
-  if (!piece->moved_once && moved) {
-    piece->moved_once = true;
-  }
-
-  return moved;
 }
 
 // NOTE: forward declaration...
@@ -1262,9 +1338,16 @@ void user_control_piece(Context* ctx, bool can_control_black) {
       if (white_check) {
 	filter_moves_that_will_not_protect_king(selected_piece, &mr);
       }
-      if (move_piece_to(&selected_piece, fix_to_tile_space(ctx->mpos), mr, true)) {
-	select_piece(NULL);
-	change_turn();
+
+      // Check for castling
+      if (selected_piece->type == PIECE_TYPE_KING &&
+	  castle(selected_piece, get_piece_at_pos(fix_to_tile_space(ctx->mpos)))) {
+	log_info("Castled!");
+      } else {
+	if (move_piece_to(&selected_piece, fix_to_tile_space(ctx->mpos), mr, true)) {
+	  select_piece(NULL);
+	  change_turn();
+	}
       }
       free_movement_results(mr);
     } else {
