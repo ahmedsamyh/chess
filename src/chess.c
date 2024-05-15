@@ -16,7 +16,9 @@ static const int cols = 8;
 static const int rows = 8;
 static Rect board_rect = {0};
 
-#define CHAR_SIZE 32
+#define CHAR_SIZE 24
+
+static Vector2f scale = {1.f, 1.f};
 
 #define WHITE false
 #define BLACK true
@@ -430,8 +432,7 @@ bool change_piece_type(Piece* piece, const Piece_type type) {
 
   if (!Sprite_init(&piece->spr, tex, PIECE_TYPE_COUNT*2, 1)) return false;
 
-  piece->spr.scale.x = (float)(piece->ctx->win->width/480);
-  piece->spr.scale.y = (float)(piece->ctx->win->height/480);
+  piece->spr.scale = scale;
 
 #define X(idx) ((idx)*2 + (piece->black ? 1 : 0))
   switch (type) {
@@ -1546,20 +1547,29 @@ cstr mainmenu_item_as_str(Mainmenu_item mmi) {
   return "CURSED!";
 }
 
-#define MAINMENU_ITEM_STR_COUNT (8 + 4)
-char mainmenu_item_str[MAINMENU_ITEM_STR_COUNT] = {0};
 
+static Sprite mmi_selected_sprite = {0};
 static void draw_mainmenu(Context* ctx) {
   draw_mainmenu_bg(ctx);
 
-  float start = (float)ctx->win->height * 0.5f;
+  float y = (float)ctx->win->height * 0.65f;
   float padding = 0.f;
   int char_size = 72;
   for (int i = 0; i < (int)MAINMENU_ITEM_COUNT; ++i) {
     cstr text = mainmenu_item_as_str((Mainmenu_item)i);
-    snprintf(mainmenu_item_str, MAINMENU_ITEM_STR_COUNT, "%s%s%s", (i == (int)selected_mmi ? ">>" : ""), text, (i == (int)selected_mmi ? "<<" : ""));
-    Vector2f pos = {10.f, start + ((float)char_size * (float)i) + (padding * (float)i)};
-    draw_text(ctx, &ctx->default_font, mainmenu_item_str, pos, char_size, COLOR_WHITE);
+    Vector2f text_size = get_text_size(ctx, &ctx->default_font, text, char_size);
+    Vector2f pos = {(float)ctx->win->width*0.5f, y + ((float)char_size * (float)i) + (padding * (float)i)};
+    draw_text_aligned(ctx, &ctx->default_font, text, pos, char_size, COLOR_WHITE, TEXT_ALIGN_TOP_CENTER);
+
+    if (i == (int)selected_mmi) {
+      float pad = 12.f;
+      float f = 10.f;
+      mmi_selected_sprite.pos.y += ((pos.y) - mmi_selected_sprite.pos.y) * ctx->delta * f;
+      mmi_selected_sprite.pos.x += ((pos.x - pad - (text_size.x * 0.5f) - (mmi_selected_sprite.texture->size.x * 0.5f)) - mmi_selected_sprite.pos.x) * ctx->delta * f;
+      draw_sprite(ctx, &mmi_selected_sprite);
+      float x = mmi_selected_sprite.pos.x + (pos.x - mmi_selected_sprite.pos.x) * 2.f;
+      draw_sprite_at(ctx, &mmi_selected_sprite, (Vector2f) {x, mmi_selected_sprite.pos.y});
+    }
   }
 }
 
@@ -1571,6 +1581,21 @@ static void update_mainmenu(Context* ctx) {
   if (clock_key_pressed(ctx, KEY_UP)) {
     selected_mmi--;
     if (selected_mmi < 0) selected_mmi = (int)(MAINMENU_ITEM_COUNT-1);
+  }
+
+  if (clock_key_pressed(ctx, KEY_ENTER)) {
+    switch (selected_mmi) {
+    case MAINMENU_ITEM_PLAY: {
+      state = STATE_PLAY;
+    } break;
+    case MAINMENU_ITEM_OPTIONS: {
+      state = STATE_OPTIONS;
+    } break;
+    case MAINMENU_ITEM_QUIT: {
+      // TODO: quit
+    } break;
+    default: ASSERT(0 && "Unreachable!");
+    }
   }
 }
 
@@ -1591,6 +1616,11 @@ int WinMain(HINSTANCE instance,
 
   Context* ctx = clock_init(960, 960, 1.f, 1.f, "Chess", WINDOW_VSYNC);
 
+  scale = (Vector2f) {
+    (float)ctx->win->width / 480.f,
+    (float)ctx->win->height / 480.f,
+  };
+
   Arena str_arena = Arena_make(0);
 
   board_rect = (Rect) {
@@ -1604,24 +1634,22 @@ int WinMain(HINSTANCE instance,
 
   init_pieces(ctx);
 
-  Font font = ctx->default_font;
+  Font* font = &ctx->default_font;
 
 #ifdef DEBUG
 
-  UI ui = UI_make(ctx, &font, (Vector2f) {50.f, 10.f}, "Debug");
+  UI ui = UI_make(ctx, font, (Vector2f) {50.f, 10.f}, "Debug");
 #endif
   Sprite hovering_piece_sprite = {0};
   if (!Sprite_init(&hovering_piece_sprite, Resman_load_texture_from_file(ctx->resman, "resources/gfx/piece_sheet.png"), PIECE_TYPE_COUNT*2, 1)) return 1;
   Sprite_center_origin(&hovering_piece_sprite);
-  hovering_piece_sprite.scale.x = (float)(ctx->win->width/480);
-  hovering_piece_sprite.scale.y = (float)(ctx->win->height/480);
+  hovering_piece_sprite.scale = scale;
   hovering_piece_sprite.tint.a = 0.4f;
 
   Sprite selected_tile_spr = {0};
   if (!Sprite_init(&selected_tile_spr, Resman_load_texture_from_file(ctx->resman, "resources/gfx/movable_tile.png"), 2, 1)) return 1;
   Sprite_center_origin(&selected_tile_spr);
-  selected_tile_spr.scale.x = (float)(ctx->win->width/480)  + 1.f;
-  selected_tile_spr.scale.y = (float)(ctx->win->height/480) + 1.f;
+  selected_tile_spr.scale = v2f_adds(scale, 1.f);
 
   // TEMP: Piece testing
 #if TESTING
@@ -1632,6 +1660,16 @@ int WinMain(HINSTANCE instance,
     arrput(pieces, p);
   }
 #endif
+
+  Texture* mmi_selected_tex = Resman_load_texture_from_file(ctx->resman, "resources/gfx/mmi_selected.png");
+
+  if (!Sprite_init(&mmi_selected_sprite, mmi_selected_tex, 1, 1)) {
+    return 1;
+  }
+  mmi_selected_sprite.origin.x = mmi_selected_sprite.texture->size.x * 0.5f;
+  mmi_selected_sprite.scale = scale;
+  mmi_selected_sprite.pos.y = (float)ctx->win->height * 0.65f;
+  mmi_selected_sprite.pos.x = (float)ctx->win->width * 0.5f;
 
   while (!clock_should_quit(ctx)) {
     clock_begin_draw(ctx);
@@ -1649,7 +1687,7 @@ int WinMain(HINSTANCE instance,
     case STATE_OPTIONS: {
     } break;
     case STATE_PLAY: {
-      draw_board(ctx, &font, &selected_tile_spr, &hovering_piece_sprite);
+      draw_board(ctx, font, &selected_tile_spr, &hovering_piece_sprite);
     } break;
     default: ASSERT(0 && "Unreachable!");
     }
